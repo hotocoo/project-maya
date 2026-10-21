@@ -2145,7 +2145,7 @@ def check_sha256(shards: list, quant: str | None) -> None:
 
 def metal_tokenizer_step(a, d: Path, shards: list, quant: str) -> Path:
     """Step 6 on Metal: the engine reads the GGUF files itself (no pack), the server needs the tokenizer and the chat
-    template, exported from the first shard into <model folder>/metal/tokenizer (tools/strata_tokenizer.py)."""
+    template, exported from the first shard into <model folder>/metal/tokenizer (tools/maya_tokenizer.py)."""
     step(6, "the tokenizer (Metal reads the GGUF files itself: no pack)")
     check_sha256(shards, quant)
     out = d / "metal"
@@ -2155,7 +2155,7 @@ def metal_tokenizer_step(a, d: Path, shards: list, quant: str) -> Path:
         return out
     if not os.access(d, os.W_OK):
         fail(f"{d} is not writable: the tokenizer is written next to the GGUF files", "pass --gguf-dir with a writable folder")
-    r = run([sys.executable, str(ROOT / "tools" / "strata_tokenizer.py"), "--gguf", str(shards[0]), "--out", str(out)],
+    r = run([sys.executable, str(ROOT / "tools" / "maya_tokenizer.py"), "--gguf", str(shards[0]), "--out", str(out)],
             check=False)
     if r.returncode != 0 or not vocab.exists():
         fail(f"the tokenizer could not be exported from {shards[0].name}", "the reason is in the messages above (the "
@@ -3258,7 +3258,7 @@ def bench(cfg_path: Path, version: str) -> int:
         pass
     sys.path.insert(0, str(ROOT))
     import serve.server as SV                      # the server's own engine command and environment
-    import strata_tokenizer as ST
+    import maya_tokenizer as ST
     args = cfg.get("args") or []
     pack = Path(args[args.index("--glm-pack") + 1]) if "--glm-pack" in args[:-1] else None
     tp = Path(cfg.get("tokenizer") or (pack / "tokenizer" if pack else ""))
