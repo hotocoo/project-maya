@@ -620,6 +620,9 @@ int serve(GlmMetal& model, const std::vector<std::string>& args) {
     const bool mtp_wanted = md && *md ? std::atoi(md) != 0 : model.stats().experts_all_resident;
     s.mtp = mtp_wanted && model.has_mtp() && std::getenv("MAYA_GLM_NO_MTP") == nullptr &&
             std::getenv("MAYA_GLM_NO_SPEC") == nullptr;
+    if (model.has_mtp() && !s.mtp)
+        std::printf("NOTE MTP drafting is off (the experts stream from the SSD); MAYA_GLM_NO_MTP=1 frees the NextN "
+                    "block's memory for the expert pool\n");
     if (s.mtp) s.mtp_len = std::make_unique<DraftLength>(mtp_draft_cap());
     const auto& st = model.stats();
     std::printf("INFO engine=%s context=%lld logit_bias=1 kv_ctx=%lld kv_gb=%.3f vram_gb=%.1f vram_slots=%zu\n",
