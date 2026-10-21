@@ -23,6 +23,8 @@ struct TensorLoc {
     ggml_tensor* meta = nullptr;
 };
 
+size_t free_memory();   // glm_metal_load.cpp: what this Mac could give the process now
+
 // tensors read from GGUF files into GPU-mapped arenas: one buffer per 8 GiB, the weights by name
 struct Weights {
     ggml_context* ctx = nullptr;

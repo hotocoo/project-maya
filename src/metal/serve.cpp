@@ -9,6 +9,7 @@
 // at (seed, counter).  Same keys, same defaults, same draws, so a seeded request gives the CUDA engine's tokens for the
 // same logits.  The thinking budget and the loop guard are generate.cpp's, rule for rule.
 #include "glm_metal.hpp"
+#include "sampler.hpp"
 #include "spec.hpp"
 
 #include <algorithm>
@@ -36,116 +37,7 @@ namespace {
 
 constexpr int32_t kEos[] = {154820, 154827, 154829};
 constexpr int32_t kArgValue = 154849, kArgValueEnd = 154850, kUser = 154827;
-constexpr int kTopKMax = 64;
-constexpr int kPenCap = 4096;       // the penalty window at most (glm_model.hpp kPenCap)
 constexpr int32_t kImageToken = 154854;   // <|image|>: one per image row maya-vision encoded
-
-struct Sampling {
-    bool greedy = true;             // no sampler key: greedy (generate.cpp o.greedy)
-    int top_k = 20;
-    float top_p = 0.95f;
-    float min_p = 0.0f;
-    float temperature = 1.0f;
-    int min_keep = 1;
-    uint64_t seed = 0;
-    uint64_t counter = 0;
-    int pen_n = 0;
-    float pen_repeat = 1.0f, pen_freq = 0.0f, pen_present = 0.0f;
-    std::vector<std::pair<int32_t, float>> bias;
-};
-
-// sampler_parity.cpp's host transcription of the kernel's philox_uniform
-float philox_uniform(uint64_t seed, uint64_t counter) {
-    uint32_t c0 = (uint32_t) counter, c1 = (uint32_t) (counter >> 32);
-    uint32_t c2 = (uint32_t) seed, c3 = (uint32_t) (seed >> 32);
-    for (uint32_t i = 0; i < 10; ++i) {
-        const uint32_t hi0 = (uint32_t) (((uint64_t) 0x9E3779B9u * c0) >> 32);
-        const uint32_t hi1 = (uint32_t) (((uint64_t) 0xBB67AE85u * c2) >> 32);
-        const uint32_t lo0 = 0x9E3779B9u * c0;
-        const uint32_t lo1 = 0xBB67AE85u * c2;
-        const uint32_t n0 = hi1 ^ c1 ^ i, n1 = lo1, n2 = hi0 ^ c3 ^ 0u, n3 = lo0;
-        c0 = n0;
-        c1 = n1;
-        c2 = n2;
-        c3 = n3;
-    }
-    return (float) (c0 >> 8) * (1.0f / 16777216.0f);
-}
-
-int32_t pick(const std::vector<float>& logits, const Sampling& p, const std::vector<int32_t>& hist) {
-    const int nv = (int) logits.size();
-    std::vector<float> s(logits);
-    for (const auto& [id, b] : p.bias) s[(size_t) id] += b;
-    if (p.pen_n > 0 && !hist.empty()) {   // llama.cpp's penalties on the window's counts
-        const size_t h = std::min<size_t>((size_t) std::min(p.pen_n, kPenCap), hist.size());
-        std::vector<std::pair<int32_t, int>> counts;
-        std::vector<int32_t> win(hist.end() - (long) h, hist.end());
-        std::sort(win.begin(), win.end());
-        for (size_t i = 0; i < win.size();) {
-            size_t j = i;
-            while (j < win.size() && win[j] == win[i]) ++j;
-            if (win[i] >= 0 && win[i] < nv) counts.push_back({win[i], (int) (j - i)});
-            i = j;
-        }
-        for (const auto& [v, c] : counts) {
-            float l = s[(size_t) v];
-            if (l <= 0.0f) l *= p.pen_repeat;
-            else l /= p.pen_repeat;
-            l -= (float) c * p.pen_freq + 1.0f * p.pen_present;
-            s[(size_t) v] = l;
-        }
-    }
-    if (p.greedy || p.temperature <= 0.0f) {   // the argmax, ties to the lower id
-        int best = 0;
-        for (int v = 1; v < nv; ++v)
-            if (s[(size_t) v] > s[(size_t) best]) best = v;
-        return best;
-    }
-    const int k = std::min(nv, (p.top_k > 0 && p.top_k < kTopKMax) ? p.top_k : kTopKMax);
-    std::vector<int32_t> ids((size_t) nv);
-    for (int v = 0; v < nv; ++v) ids[(size_t) v] = v;
-    std::partial_sort(ids.begin(), ids.begin() + k, ids.end(), [&](int32_t a, int32_t b) {
-        return s[(size_t) a] > s[(size_t) b] || (s[(size_t) a] == s[(size_t) b] && a < b);
-    });
-    ids.resize((size_t) k);
-    int n_keep = k;
-    if (p.top_p < 1.0f) {
-        double sum = 0.0;
-        for (int i = 0; i < k; ++i) sum += std::exp((double) s[(size_t) ids[(size_t) i]] - (double) s[(size_t) ids[0]]);
-        double cum = 0.0;
-        int cut = k;
-        for (int i = 0; i < k; ++i) {
-            cum += std::exp((double) s[(size_t) ids[(size_t) i]] - (double) s[(size_t) ids[0]]) / sum;
-            if (cum >= (double) p.top_p) {
-                cut = i + 1;
-                break;
-            }
-        }
-        if (cut < p.min_keep) cut = std::min(p.min_keep, k);
-        n_keep = cut;
-    }
-    if (p.min_p > 0.0f) {
-        const float thresh = s[(size_t) ids[0]] + std::log(p.min_p);
-        for (int i = 0; i < n_keep; ++i)
-            if (s[(size_t) ids[(size_t) i]] < thresh) {
-                n_keep = i;
-                break;
-            }
-    }
-    n_keep = std::max(n_keep, 1);
-    const float inv_t = 1.0f / p.temperature;
-    float mx = s[(size_t) ids[0]] * inv_t;
-    for (int i = 1; i < n_keep; ++i) mx = std::fmax(mx, s[(size_t) ids[(size_t) i]] * inv_t);
-    double sum = 0.0;
-    for (int i = 0; i < n_keep; ++i) sum += std::exp((double) (s[(size_t) ids[(size_t) i]] * inv_t) - (double) mx);
-    const float u = philox_uniform(p.seed, p.counter);
-    double cum = 0.0;
-    for (int i = 0; i < n_keep; ++i) {
-        cum += std::exp((double) (s[(size_t) ids[(size_t) i]] * inv_t) - (double) mx) / sum;
-        if ((double) u < cum) return ids[(size_t) i];
-    }
-    return ids[(size_t) (n_keep - 1)];
-}
 
 int env_int(const char* k, int def) {
     const char* v = std::getenv(k);
@@ -157,7 +49,7 @@ struct Input {
     std::mutex mu;
     std::condition_variable cv;
     std::deque<std::string> q;
-    std::atomic<bool> stop{false}, wrap{false};
+    std::atomic<bool> stop{false}, wrap{false}, pause{false};
     bool eof = false;
 
     void run() {
@@ -166,7 +58,10 @@ struct Input {
             while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
             if (line.empty()) continue;
             if (line == "STOP" || line.rfind("STOP ", 0) == 0 || line == "PAUSE" || line.rfind("PAUSE ", 0) == 0) {
-                stop.store(true);   // PAUSE: a STOP here (the server re-sends prompt + what was written)
+                // PAUSE: a STOP that keeps the state with what was written, so the server's follow-up GEN (the
+                // prompt + those tokens) reads none of it again (generate.cpp's pause_snapshot)
+                if (line.rfind("PAUSE", 0) == 0) pause.store(true);
+                stop.store(true);
                 continue;
             }
             if (line == "WRAP") {
@@ -372,6 +267,7 @@ struct Server {
         const int spec_req = spec.req;
         const int n_vocab = model.geometry().n_vocab;
         in.stop.store(false);
+        in.pause.store(false);
         std::string e;
         const char* finish = "length";
         const auto t0 = std::chrono::steady_clock::now();
@@ -445,9 +341,11 @@ struct Server {
             std::fprintf(stderr, "glm loop guard: %s\n", m);
             std::printf("NOTE %s\n", m);
         };
+        std::vector<int32_t> emitted;   // what this request wrote (a PAUSE keeps the state they lead to)
         auto on_token = [&](int32_t t) -> bool {
             std::printf("T %d\n", t);
             std::fflush(stdout);
+            emitted.push_back(t);
             ++produced;
             if (sp.pen_n > 0) pen_hist.push_back(t);
             gen_hist.push_back(t);
@@ -559,15 +457,11 @@ struct Server {
                             return err(bad ? "non-finite logits" : e);
                         }
                     } else {
-                        for (int32_t t = y;;) {
+                        for (int32_t t = y;;) {   // (on_token checked STOP: the last token written is never fed)
                             if (!model.forward({t}, logits, e)) {
                                 model.reset();
                                 cached.clear();
                                 return err(e);
-                            }
-                            if (in.stop.load()) {
-                                finish = "cancel";
-                                break;
                             }
                             t = pick_one(logits.data());
                             if (bad) {
@@ -584,10 +478,22 @@ struct Server {
             }
         }
         const auto t2 = std::chrono::steady_clock::now();
+        // PAUSE: every token written but the last was fed, so the state is the follow-up prompt's less its last
+        // token - exactly what the prefix reuse restores
+        if (in.pause.load() && std::strcmp(finish, "cancel") == 0 && !emitted.empty() &&
+            model.position() == (int64_t) (n + emitted.size() - 1)) {
+            model.snapshot_save();
+            cached.assign(prompt.begin(), prompt.end());
+            cached.insert(cached.end(), emitted.begin(), emitted.end() - 1);
+            cached_img = img_prefix_hash((int64_t) cached.size());
+        }
         std::printf("DONE %lld %zu %.1f %.1f %s 0 0 %zu 0 0\n", (long long) produced, n,
                     std::chrono::duration<double, std::milli>(t1 - t0).count(),
                     std::chrono::duration<double, std::milli>(t2 - t1).count(), finish, reuse);
         std::fflush(stdout);
+        if (const size_t grown = model.grow_pool())   // memory freed since the start: more experts stay resident
+            std::fprintf(stderr, "maya-metal: the expert pool grew by %.1f GB to %.1f GB\n", grown / 1e9,
+                         model.stats().pool_bytes / 1e9);
         std::string pe;   // this machine's expert usage, for the next start (after DONE: nobody waits on it)
         if (!model.save_profile(pe)) std::fprintf(stderr, "maya-metal: %s\n", pe.c_str());
         if (produced > 0) {
@@ -629,7 +535,7 @@ int serve(GlmMetal& model, const std::vector<std::string>& args) {
                 MAYA_VERSION, (long long) model.max_context(), (long long) model.max_context(), st.state_bytes / 1e9,
                 (st.dense_bytes + st.pool_bytes + st.state_bytes) / 1e9, st.pool_slots);
     std::printf("NOTE %s\n", model.describe().c_str());
-    std::printf("READY %lld stop\n", (long long) model.max_context());   // (no pause: PAUSE acts as STOP here)
+    std::printf("READY %lld stop pause\n", (long long) model.max_context());
     std::fflush(stdout);
     std::thread reader([&] { s.in.run(); });
     reader.detach();   // blocked in getline until stdin closes; the process exits around it

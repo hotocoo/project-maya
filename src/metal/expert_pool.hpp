@@ -55,10 +55,16 @@ public:
     ExpertPool(const ExpertPool&) = delete;
     ExpertPool& operator=(const ExpertPool&) = delete;
 
-    // layers: per layer, gate/up/down (empty entries for dense layers).  budget: bytes for all slots together.
-    // forced_slots > 0 overrides the budget (per group).  dev == nullptr: plain host memory (the CPU backend).
+    // layers: per layer, gate/up/down (empty entries for dense layers).  budget: bytes for the slots in use now;
+    // cap: bytes the pool may grow to (its address space is mapped up front, a slot takes memory once written).
+    // forced_slots > 0 overrides both (per group).  dev == nullptr: plain host memory (the CPU backend).
     bool init(const std::vector<std::vector<ExpertMatrix>>& layers, int n_expert, int min_slots, size_t budget,
-              int forced_slots, ggml_backend_device* dev, int io_threads, std::string& err);
+              size_t cap, int forced_slots, ggml_backend_device* dev, int io_threads, std::string& err);
+
+    // take up to `bytes` more of the mapped slots into use (each group by its share); returns the bytes taken
+    size_t grow(size_t bytes);
+    size_t bytes_in_use() const;
+    size_t bytes_cap() const;
 
     // the pool tensors of a layer's group (gate, up, down)
     ggml_tensor* tensor(int layer, int which) const;
@@ -87,7 +93,8 @@ private:
         int type[3] = {0, 0, 0};
         int64_t ne0[3] = {0, 0, 0}, ne1[3] = {0, 0, 0};
         size_t ebytes[3] = {0, 0, 0};
-        int n_slots = 0;
+        int n_slots = 0;                 // the slots mapped (the tensors' ne[2])
+        int active = 0;                  // the slots in use: eviction and placement stay below it
         ggml_tensor* t[3] = {nullptr, nullptr, nullptr};
         std::vector<int> owner;          // slot -> layer * n_expert + expert, -1 free
         std::vector<uint64_t> last_use;  // slot -> tick
@@ -99,6 +106,7 @@ private:
         std::vector<int> slot_of;        // expert -> slot, -1 not resident
         int base = 0;                    // all resident: the layer's first slot
     };
+    void pin_slots(Group& g, int from, int to);
     std::vector<Group> groups_;
     std::vector<Layer> layers_;
     ggml_context* ctx_ = nullptr;
@@ -115,5 +123,9 @@ private:
 
 void* host_alloc(size_t bytes);           // page-aligned, zeroed; the GPU can wrap it without a copy
 void host_free(void* p, size_t bytes);
+// keep [p, p + bytes) in memory: unified memory the GPU reads must not be compressed or swapped out by another
+// program's demand (a graph would then wait seconds on page-ins).  MAYA_METAL_NO_PIN=1 skips it.  False: refused
+// (the wire limit, vm.user_wire_limit); the memory then stays pageable, said once.
+bool host_pin(void* p, size_t bytes);
 
 }  // namespace maya::metal

@@ -874,6 +874,19 @@ bool GlmMetal::snapshot_restore() {
 
 int64_t GlmMetal::snapshot_position() const { return p_->snap_pos; }
 
+size_t GlmMetal::grow_pool() {
+    Impl& m = *p_;
+    if (m.pool.all_resident() || m.o.pool_slots > 0) return 0;
+    const char* hv = std::getenv("MAYA_GLM_RAM_HEADROOM_GB");
+    const double head_gb = hv && *hv ? std::atof(hv) : 6.0;
+    const size_t avail = free_memory(), head = (size_t) (head_gb * (double) (1ull << 30));
+    if (avail <= head + ((size_t) 1 << 30)) return 0;   // less than 1 GB to gain: not worth a NOTE
+    const size_t got = m.pool.grow(avail - head);
+    m.st.pool_slots = m.pool.slots_total();
+    m.st.pool_bytes = m.pool.bytes();
+    return got;
+}
+
 bool GlmMetal::save_profile(std::string& err) const {
     const Impl& m = *p_;
     const std::string& path = m.o.expert_profile_save;

@@ -49,7 +49,7 @@ add_subdirectory(${_maya_llamacpp_dir}/ggml ${CMAKE_BINARY_DIR}/ggml EXCLUDE_FRO
 # the engine reports Maya's release (VERSION) as its version
 file(STRINGS ${CMAKE_CURRENT_SOURCE_DIR}/VERSION _maya_version LIMIT_COUNT 1)
 add_library(maya_metal STATIC src/metal/glm_metal.cpp src/metal/glm_metal_load.cpp src/metal/expert_pool.cpp
-                              src/metal/glm_metal_dflash.cpp src/metal/spec.cpp)
+                              src/metal/glm_metal_dflash.cpp src/metal/spec.cpp src/metal/sampler.cpp)
 target_include_directories(maya_metal PUBLIC src/metal)
 target_compile_definitions(maya_metal PUBLIC MAYA_VERSION="${_maya_version}")
 target_link_libraries(maya_metal PUBLIC ggml ggml-base ggml-cpu ggml-metal)
@@ -62,6 +62,17 @@ if(MAYA_METAL_TESTS)
   # the CUDA engine's GLM gates (src/core/glm_model_test.cpp, glm_model_big_test.cpp) on maya-metal
   add_executable(metal_model_test src/metal/metal_model_test.cpp)
   target_link_libraries(metal_model_test PRIVATE maya_metal)
+  add_executable(metal_sampler_test src/metal/metal_sampler_test.cpp)
+  target_link_libraries(metal_sampler_test PRIVATE maya_metal)
+  add_test(NAME metal_sampler_test COMMAND metal_sampler_test)
+  # the --serve protocol as serve/server.py drives it: PAUSE keeps the state, seeded sampling repeats, spec=1 changes
+  # nothing (tools/test_metal_serve.py; Python without numpy)
+  find_program(MAYA_SERVE_PYTHON3 python3)
+  if(MAYA_SERVE_PYTHON3)
+    add_test(NAME metal_serve_test
+             COMMAND ${MAYA_SERVE_PYTHON3} ${CMAKE_CURRENT_SOURCE_DIR}/tools/test_metal_serve.py $<TARGET_FILE:maya-metal>
+                     ${CMAKE_CURRENT_SOURCE_DIR}/data/glm5-synth.gguf)
+  endif()
   add_test(NAME metal_model_test COMMAND metal_model_test small)
   # the same gates on ggml-cpu (the oracle backend), and with the expert pool at its floor and small slices
   add_test(NAME metal_model_test_cpu COMMAND metal_model_test small)

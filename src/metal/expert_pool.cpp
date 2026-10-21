@@ -32,6 +32,17 @@ void host_free(void* p, size_t bytes) {
     if (p) munmap(p, bytes);
 }
 
+bool host_pin(void* p, size_t bytes) {
+    static const bool off = std::getenv("MAYA_METAL_NO_PIN") != nullptr;
+    if (off || p == nullptr || bytes == 0) return true;
+    if (mlock(p, bytes) == 0) return true;
+    static std::atomic<bool> said{false};
+    if (!said.exchange(true))
+        std::fprintf(stderr, "maya-metal: cannot pin %.1f GB in memory (%s): it stays pageable, so other programs' "
+                     "demand can swap it out\n", bytes / 1e9, std::strerror(errno));
+    return false;
+}
+
 static size_t page_round(size_t n) {
     const size_t pg = (size_t) getpagesize();
     return (n + pg - 1) / pg * pg;
@@ -144,8 +155,45 @@ ExpertPool::~ExpertPool() {
 
 size_t ExpertPool::slots_total() const {
     size_t n = 0;
-    for (const auto& g : groups_) n += (size_t) g.n_slots;
+    for (const auto& g : groups_) n += (size_t) g.active;
     return n;
+}
+
+void ExpertPool::pin_slots(Group& g, int from, int to) {
+    for (int w = 0; w < 3 && to > from; ++w) {   // whole pages over the slots' bytes
+        const size_t pg = (size_t) getpagesize();
+        const uintptr_t a = (uintptr_t) g.t[w]->data + (size_t) from * g.ebytes[w];
+        const uintptr_t b = (uintptr_t) g.t[w]->data + (size_t) to * g.ebytes[w];
+        const uintptr_t a0 = a / pg * pg, b1 = (b + pg - 1) / pg * pg;
+        host_pin((void*) a0, b1 - a0);
+    }
+}
+
+size_t ExpertPool::bytes_in_use() const {
+    size_t n = 0;
+    for (const auto& g : groups_) n += (size_t) g.active * (g.ebytes[0] + g.ebytes[1] + g.ebytes[2]);
+    return n;
+}
+
+size_t ExpertPool::bytes_cap() const {
+    size_t n = 0;
+    for (const auto& g : groups_) n += (size_t) g.n_slots * (g.ebytes[0] + g.ebytes[1] + g.ebytes[2]);
+    return n;
+}
+
+size_t ExpertPool::grow(size_t bytes) {
+    const size_t room = bytes_cap() - bytes_in_use();
+    if (room == 0 || bytes == 0) return 0;
+    const double f = std::min(1.0, (double) bytes / (double) room);   // every group the same share of its room
+    size_t taken = 0;
+    for (auto& g : groups_) {
+        const int add = (int) (f * (g.n_slots - g.active));
+        pin_slots(g, g.active, g.active + add);
+        g.active += add;
+        taken += (size_t) add * (g.ebytes[0] + g.ebytes[1] + g.ebytes[2]);
+    }
+    bytes_ = bytes_in_use();
+    return taken;
 }
 
 ggml_tensor* ExpertPool::tensor(int layer, int which) const {
@@ -154,7 +202,9 @@ ggml_tensor* ExpertPool::tensor(int layer, int which) const {
 }
 
 bool ExpertPool::init(const std::vector<std::vector<ExpertMatrix>>& layers, int n_expert, int min_slots,
-                      size_t budget, int forced_slots, ggml_backend_device* dev, int io_threads, std::string& err) {
+                      size_t budget, size_t cap, int forced_slots, ggml_backend_device* dev, int io_threads,
+                      std::string& err) {
+    cap = std::max(cap, budget);
     n_expert_ = n_expert;
     usage_.assign(layers.size() * (size_t) n_expert, 0);
     layers_.assign(layers.size(), Layer{});
@@ -193,7 +243,8 @@ bool ExpertPool::init(const std::vector<std::vector<ExpertMatrix>>& layers, int 
     for (size_t g = 0; g < groups_.size(); ++g)
         full += (double) group_layers[g] * n_expert *
                 (double) (groups_[g].ebytes[0] + groups_[g].ebytes[1] + groups_[g].ebytes[2]);
-    const double frac = budget == 0 ? 1.0 : std::min(1.0, (double) budget / full);
+    const double frac = cap == 0 ? 1.0 : std::min(1.0, (double) cap / full);         // the slots mapped
+    const double use = budget == 0 ? 1.0 : std::min(1.0, (double) budget / full);    // the slots in use now
     // a pool tensor holds at most kMaxSlots slots: ggml-metal's matrix-matrix expert kernel (a prompt's slices) maps
     // a tensor's experts with one thread each, at most 1024 - so a format's layers are split into groups of
     // consecutive layers that each stay under it (slots are shared, least recently used first, inside a group)
@@ -219,10 +270,11 @@ bool ExpertPool::init(const std::vector<std::vector<ExpertMatrix>>& layers, int 
             int n = forced_slots > 0 ? forced_slots : (int) (per_layer * nl);
             n = std::min({all, std::max(n, min_slots), std::max(kMaxSlots, min_slots)});
             G.n_slots = n;
-            all_resident_ = all_resident_ && n == all;
+            G.active = forced_slots > 0 ? n : std::min(n, std::max((int) (use * n_expert * nl), min_slots));
+            all_resident_ = all_resident_ && G.active == all;
             if (std::getenv("MAYA_METAL_POOL_DEBUG"))
-                std::fprintf(stderr, "pool group: format %zu, %d layers, %d slots, %.2f MB a slot\n", f, nl, n,
-                             (G.ebytes[0] + G.ebytes[1] + G.ebytes[2]) / 1e6);
+                std::fprintf(stderr, "pool group: format %zu, %d layers, %d of %d slots, %.2f MB a slot\n", f, nl,
+                             G.active, n, (G.ebytes[0] + G.ebytes[1] + G.ebytes[2]) / 1e6);
             for (int i = 0; i < nl; ++i) layers_[(size_t) ls[(size_t) (at + i)]].group = (int) groups_.size();
             groups_.push_back(G);
             at += nl;
@@ -253,13 +305,14 @@ bool ExpertPool::init(const std::vector<std::vector<ExpertMatrix>>& layers, int 
                 err = "cannot place an expert pool tensor";
                 return false;
             }
-            bytes_ += sz;
         }
         G.owner.assign((size_t) G.n_slots, -1);
         G.last_use.assign((size_t) G.n_slots, 0);
         G.stamp.assign((size_t) G.n_slots, 0);
     }
     reader_ = new ParallelReader(io_threads);
+    bytes_ = bytes_in_use();
+    for (auto& G : groups_) pin_slots(G, 0, G.active);
 
     if (all_resident_) {   // every expert has a fixed slot: read them all now
         std::vector<int> next(groups_.size(), 0);
@@ -299,8 +352,8 @@ bool ExpertPool::warm(const std::vector<std::pair<int, int>>& ranked, std::strin
         if (L.group < 0 || L.slot_of[(size_t) e] >= 0) continue;
         Group& G = groups_[(size_t) L.group];
         int& s = next[(size_t) L.group];
-        while (s < G.n_slots && G.owner[(size_t) s] >= 0) ++s;
-        if (s >= G.n_slots) continue;
+        while (s < G.active && G.owner[(size_t) s] >= 0) ++s;
+        if (s >= G.active) continue;
         G.owner[(size_t) s] = l * n_expert_ + e;
         L.slot_of[(size_t) e] = s;
         for (int w = 0; w < 3; ++w)
@@ -335,7 +388,7 @@ bool ExpertPool::ensure(int layer, const int32_t* experts, size_t n, int32_t* sl
         } else {
             ++misses;
             uint64_t best = UINT64_MAX;
-            for (int c = 0; c < G.n_slots; ++c)
+            for (int c = 0; c < G.active; ++c)
                 if (G.stamp[(size_t) c] != call_ && G.last_use[(size_t) c] < best) {
                     best = G.last_use[(size_t) c];
                     s = c;

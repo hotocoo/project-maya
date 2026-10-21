@@ -91,6 +91,8 @@ struct Meta {
     bool has(const std::string& k) const { return key(k) >= 0; }
 };
 
+}  // namespace
+
 // what the Mac could give this process now: free, inactive, purgeable and speculative pages (the dense weights and the
 // state are already allocated, so they are not in it)
 size_t free_memory() {
@@ -100,8 +102,6 @@ size_t free_memory() {
     const uint64_t pages = (uint64_t) vs.free_count + vs.inactive_count + vs.purgeable_count + vs.speculative_count;
     return (size_t) (pages * (uint64_t) getpagesize());
 }
-
-}  // namespace
 
 GlmMetal::Impl::~Impl() {
     if (sched) ggml_backend_sched_free(sched);
@@ -292,6 +292,7 @@ bool Weights::load(const std::vector<std::pair<std::string, TensorLoc>>& tensors
             return false;
         }
         mem.push_back({m, chunk});
+        host_pin(m, chunk);
         ggml_backend_buffer_t buf = dev ? ggml_backend_dev_buffer_from_host_ptr(dev, m, chunk, chunk)
                                         : ggml_backend_cpu_buffer_from_ptr(m, chunk);
         if (!buf) {
@@ -407,7 +408,7 @@ bool GlmMetal::Impl::init_experts(std::string& err) {
             total += ggml_nbytes(t);
         }
     }
-    size_t budget = o.expert_budget;
+    size_t budget = o.expert_budget, cap = budget;
     if (budget == 0) {
         // what the GPU may keep resident, less the dense weights, the state and a margin for activations
         size_t working = gpu_dev ? 0 : (size_t) 48 << 30;
@@ -418,6 +419,7 @@ bool GlmMetal::Impl::init_experts(std::string& err) {
         }
         const size_t reserve = st.dense_bytes + st.state_bytes + ((size_t) 6 << 30);
         budget = working > reserve ? working - reserve : (size_t) 1 << 30;
+        cap = budget;   // what the pool may grow to as memory frees up (GlmMetal::grow_pool)
         // and no more than this Mac has free now, less a headroom (MAYA_GLM_RAM_HEADROOM_GB, default 6, as for the CUDA engine's RAM tier): unified memory
         // is shared with every other program, and a pool past what is free gets compressed or swapped - a graph that
         // reads it then stalls for seconds (measured: 20-57 s) instead of 10 ms
@@ -433,7 +435,8 @@ bool GlmMetal::Impl::init_experts(std::string& err) {
         }
     }
     const int min_slots = g.n_expert + g.n_expert_used;   // one slice may touch every expert of a layer
-    if (!pool.init(layers, g.n_expert, min_slots, std::min(budget, total), o.pool_slots, gpu_dev, o.io_threads,
+    if (!pool.init(layers, g.n_expert, min_slots, std::min(budget, total), std::min(cap, total), o.pool_slots, gpu_dev,
+                   o.io_threads,
                    err))
         return false;
     // the learned profile when there is one, else the shipped one: the pool starts with their first experts

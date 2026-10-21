@@ -142,6 +142,10 @@ public:
     // starting profile's order for the rest
     bool save_profile(std::string& err) const;
 
+    // grow the expert pool into memory freed since it was sized (it starts from what was free then): up to the
+    // GPU's working-set budget, keeping the headroom free.  Returns the bytes added; cheap when nothing changed.
+    size_t grow_pool();
+
     void snapshot_save();
     bool snapshot_restore();          // false: no snapshot
     int64_t snapshot_position() const;  // -1: none
