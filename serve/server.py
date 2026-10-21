@@ -71,6 +71,8 @@ def wait_gpu_release(pid: int, timeout: float = 60.0):
     its pinned RAM tier after the process is gone - and an engine started at once finds the cards full (the split
     search measures them before anything loads: the context reload's new engine got 0.09 GB and failed).  Waits until
     no GPU lists the process any more (NVML), or a few seconds where NVML can't say (AMD)."""
+    if sys.platform == "darwin":            # Metal: unified memory goes back with the process, no GPU lists it
+        return
     try:
         from serve.telemetry import gpu_pids
     except ImportError:
@@ -1264,11 +1266,13 @@ def child_env(cfg: dict) -> dict:
     env = dict(os.environ)
     if gpu_list(cfg) and cfg.get("backend") == "hip":   # AMD: numbered as HIP numbers them (setup's KFD order)
         env["HIP_VISIBLE_DEVICES"] = ",".join(str(i) for i in gpu_list(cfg))
-    elif gpu_list(cfg):                              # issue #51: the GPU(s) to run on, numbered as nvidia-smi does; CUDA's
+    elif gpu_list(cfg) and cfg.get("backend") != "metal":   # issue #51: the GPU(s) to run on, numbered as nvidia-smi does; CUDA's
         env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"      # own default order (fastest first) can number the cards otherwise
         env["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in gpu_list(cfg))
     for k, v in (cfg.get("env") or {}).items():      # engine settings the config carries (AMD: the GEMM tuning table)
         env[str(k)] = str(v)
+        if cfg.get("backend") == "metal":            # maya-metal reads its settings by their MAYA_* names
+            env[maya_names.shown(str(k))] = str(v)
     dirs = [d for d in cfg.get("lib_dirs") or [] if Path(d).is_dir()]
     if dirs:
         var = "PATH" if os.name == "nt" else "LD_LIBRARY_PATH"
@@ -3873,11 +3877,12 @@ def main() -> int:
         vcfg = cfg.get("vision") or None
         vlog = (open(cfg["log"], "a", encoding="utf-8") if cfg.get("log") else None) if vcfg else None
         venv = dict(env)
-        if vcfg and vcfg.get("gpu") and gpu_list(cfg) and cfg.get("backend") != "hip":
+        if vcfg and vcfg.get("gpu") and gpu_list(cfg) and cfg.get("backend") not in ("hip", "metal"):
             venv["CUDA_VISIBLE_DEVICES"] = str(gpu_list(cfg)[0])   # the encoder on the first GPU only
         # the GLM engine lends the encoder the tail of its expert cache while it encodes, sized by what the encoder
         # measured on this GPU ("resident": true keeps the encoder running beside the model, holding its VRAM)
-        on_demand = bool(vcfg) and vcfg.get("gpu") and not vcfg.get("resident")
+        # (Metal: one memory shared with the engine, which answers ERR to VLEND / VRECLAIM: the encoder stays resident)
+        on_demand = bool(vcfg) and vcfg.get("gpu") and not vcfg.get("resident") and cfg.get("backend") != "metal"
         engine_env = env
         if on_demand:
             fp = vision_footprint(vcfg, venv, Path(a.config).resolve().with_name("vision-memory.json"),
@@ -3969,8 +3974,9 @@ def main() -> int:
     if a.config:
         svc.config_path = str(Path(a.config).resolve())  # a context change from the dashboard is saved there
     args = [str(x) for x in cfg.get("args") or []]
-    if "--glm-pack" in args[:-1]:                       # the model's folder: the pack's parent holds its GGUF files
-        svc.model_dir = Path(args[args.index("--glm-pack") + 1]).resolve().parent
+    flag = next((f for f in ("--glm-pack", "--gguf") if f in args[:-1]), None)   # (Metal: the first GGUF file, no pack)
+    if flag:                                            # the model's folder: the parent of the pack or GGUF file
+        svc.model_dir = Path(args[args.index(flag) + 1]).resolve().parent
         threading.Thread(target=lambda: setattr(svc, "trained_context", trained_context(svc.model_dir)),
                          daemon=True).start()
     if a.config:                                        # the Chat settings shared with other apps, from last time

@@ -259,7 +259,8 @@ class GpuRelease(unittest.TestCase):
         from serve import server as SV, telemetry as T
         seen = [{4242, 7}, {4242, 7}, {7}]
         with mock.patch.object(T, "gpu_pids", side_effect=lambda: seen.pop(0) if len(seen) > 1 else seen[0]), \
-                mock.patch.object(SV.time, "sleep") as sleep:
+                mock.patch.object(SV.time, "sleep") as sleep, \
+                mock.patch.object(SV.sys, "platform", "linux"):
             SV.wait_gpu_release(4242, timeout=30)
         self.assertEqual(seen, [{7}])
         self.assertEqual(sleep.call_count, 2)
@@ -267,7 +268,8 @@ class GpuRelease(unittest.TestCase):
     def test_without_nvml_a_short_wait(self):
         from unittest import mock
         from serve import server as SV, telemetry as T
-        with mock.patch.object(T, "gpu_pids", return_value=None), mock.patch.object(SV.time, "sleep") as sleep:
+        with mock.patch.object(T, "gpu_pids", return_value=None), mock.patch.object(SV.time, "sleep") as sleep, \
+             mock.patch.object(SV.sys, "platform", "linux"):
             SV.wait_gpu_release(4242)
         sleep.assert_called_once()
 

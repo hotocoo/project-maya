@@ -449,6 +449,7 @@ class HipSetupTests(unittest.TestCase):
                 patch.object(sys, "argv", ["maya.py", "--check"]), \
                 patch.object(maya.S, "gpus", return_value=nvidia), \
                 patch.object(maya.S, "amd_gpus", return_value=amd), \
+             patch.object(maya, "apple_silicon", return_value=False), \
                 patch.object(maya, "check_pc", return_value={"gpus": [{"index": 0}]}) as check:
             self.assertEqual(maya.main(), 0)
         return check.call_args.args[0].backend

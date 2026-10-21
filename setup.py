@@ -196,6 +196,8 @@ def _memory_status():
 def ram_gb():
     if WIN:
         return _memory_status().ullTotalPhys / 2**30
+    if sys.platform == "darwin":
+        return int(out(["sysctl", "-n", "hw.memsize"]).strip() or 0) / 2**30
     for line in open("/proc/meminfo"):
         if line.startswith("MemTotal"):
             return int(line.split()[1]) * 1024 / 2**30
@@ -222,6 +224,8 @@ def cpu_info():
         n = out(["powershell", "-NoProfile", "-Command", "(Get-CimInstance Win32_Processor).Name"]).strip()
         name = n or name
         avx512 = bool(pf(41)) and _cpuid_avx512_full()
+    elif sys.platform == "darwin":
+        name = out(["sysctl", "-n", "machdep.cpu.brand_string"]).strip() or name
     else:
         try:
             txt = open("/proc/cpuinfo").read()
