@@ -82,8 +82,11 @@ if(MAYA_METAL_TESTS)
                        ENVIRONMENT "MAYA_METAL_POOL_SLOTS=1;MAYA_METAL_UBATCH=3;MAYA_METAL_ATTN_CHUNK=2")
   # verify windows (speculative decoding): partly wrong drafts must decode exactly as plain decoding does
   add_test(NAME metal_model_window COMMAND metal_model_test window data/glm5-synth.gguf 40)
-  set_tests_properties(metal_model_test metal_model_test_cpu metal_model_test_evict metal_model_window PROPERTIES
-                       WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+  # a 2048-token slice gathered 4 tokens a chunk: the graph outgrows any fixed budget (--ubatch 2048 aborted)
+  add_test(NAME metal_model_big_slice COMMAND metal_model_test prefill data/glm5-synth.gguf 2048)
+  set_tests_properties(metal_model_big_slice PROPERTIES ENVIRONMENT "MAYA_METAL_UBATCH=2048;MAYA_METAL_ATTN_CHUNK=4")
+  set_tests_properties(metal_model_test metal_model_test_cpu metal_model_test_evict metal_model_window
+                       metal_model_big_slice PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
   # the 45-layer fixture: its 1.2 GB GGUF is generated into the build tree (tools/glm_big_fixture.py needs numpy)
   find_program(MAYA_PYTHON3 python3)
   if(MAYA_PYTHON3)

@@ -251,7 +251,8 @@ bool GlmMetal::Impl::init_backends(std::string& err) {
     std::vector<ggml_backend_t> be;
     if (gpu) be.push_back(gpu);
     be.push_back(cpu);
-    sched = ggml_backend_sched_new(be.data(), nullptr, (int) be.size(), 32768, false, false);
+    sched = ggml_backend_sched_new(be.data(), nullptr, (int) be.size(),
+                                   graph_size(std::max(o.n_ubatch, o.max_window)), false, false);
     return sched != nullptr;
 }
 

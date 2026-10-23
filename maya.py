@@ -3471,14 +3471,6 @@ def set_up(a, prev: dict) -> Path | None:
         ok("DFlash2 drafts on this Mac, not measured against the MTP block (both are exact): "
            f"{ME} --setup --draft mtp goes back")
     elif dflash is not None:                           # DFlash2: kept only if it makes THIS PC faster (measured)
-        if getattr(a, "no_speed_calibration", False):
-            c = read_json(cfg_path)
-            c.setdefault("installer", {})["speed_calibration"] = {"date": time.strftime("%Y-%m-%d %H:%M"),
-                                                                  "skipped": "--no-speed-calibration"}
-            cfg_path.write_text(json.dumps(N.env_out(c), indent=1), encoding="utf-8")
-            ok("speed calibration skipped (--no-speed-calibration): Maya drafts with DFlash2")
-    cfg_path = write_config(a, pc, meta, pack, quant, ctx, models, vision, choice, dflash)   # 8
-    if dflash is not None:                             # DFlash2: kept only if it makes THIS PC faster (measured)
         how = drafting_choice(a, "DFlash2", "5-20")
         if how != "measure":                           # (or as the user chose)
             keep_drafting(cfg_path, how == "on")

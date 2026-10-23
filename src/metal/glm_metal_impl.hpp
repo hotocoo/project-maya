@@ -137,6 +137,7 @@ struct GlmMetal::Impl {
     ggml_tensor* wl(int il, const char* suffix) const; // blk.<il>.<suffix>
     bool embed(const int32_t* tok, int n, std::vector<float>& out, std::string& err) const;   // rows pos .. pos+n-1
     bool embed_raw(const int32_t* tok, int n, std::vector<float>& out, std::string& err) const;   // no image rows
+    size_t graph_size(int T) const;   // tensors a T-token slice's graph may hold
     bool run_slice(const int32_t* tok, int n, std::vector<float>& logits, std::string& err, bool window = false);
     bool load_dflash(std::string& err);
     bool dflash_inject(int64_t p0, int n, std::string& err);   // rows 0..n-1 of feat = positions p0..p0+n-1

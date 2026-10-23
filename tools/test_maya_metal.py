@@ -85,6 +85,23 @@ class MetalSetupTests(unittest.TestCase):
         return maya.write_config(self.a, pc, {}, self.root / "models" / "metal", "Maya-S-v2-IQ2_XXS", 16384,
                                  self.root / "data", kw.pop("vision", None), gguf=gguf, **kw), gguf
 
+    def test_set_up_writes_the_gguf_once(self):
+        # a merge once left a second write_config (without gguf=) after the Metal one: "--gguf", "None"
+        shard = self.root / "models" / "m-00001-of-00003.gguf"
+        self.a.calibrate, self.a.models_dir = False, None
+        with patch.object(maya, "choose_family", return_value="glm"), \
+             patch.object(maya, "choose_context", return_value=16384), \
+             patch.object(maya, "choose_model", return_value=("yours", "m")), \
+             patch.object(maya, "choose_draft", return_value="mtp"), \
+             patch.object(maya, "tools_step"), patch.object(maya, "build_step", return_value={}), \
+             patch.object(maya, "model_step", return_value=(shard.parent, [shard], "Maya-S-v2-IQ2_XXS")), \
+             patch.object(maya, "metal_tokenizer_step", return_value=self.root / "models" / "metal"), \
+             patch.object(maya, "vision_step", return_value=None), \
+             patch.object(maya, "write_config", wraps=maya.write_config) as wc, patch.object(maya, "say"):
+            p = maya.set_up(self.a, {})
+        self.assertEqual(wc.call_count, 1)
+        self.assertEqual(maya.read_json(p)["args"][:2], ["--gguf", str(shard)])
+
     def test_config_has_no_pack_and_no_cuda_arguments(self):
         p, gguf = self.write()
         cfg = maya.read_json(p)

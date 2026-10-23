@@ -25,6 +25,9 @@ namespace maya::metal {
 namespace {
 
 constexpr int kGraphNodes = 32768;
+constexpr int kFloatGroup = 16;     // tokens per mul_mat_id of float experts (mm_id)
+constexpr int kChunkTensors = 48;   // a DSA layer's tensors per attn_chunk gather (35 measured)
+constexpr int kGroupTensors = 16;   // a MoE layer's tensors per float-expert group (12: 4 each for gate, up, down)
 
 struct Upload {
     ggml_tensor* t;
@@ -97,8 +100,8 @@ struct Builder {
         const int64_t n = ids->ne[1];
         if (!is_float(as) || n < 32) return ggml_mul_mat_id(ctx, as, x, ids);
         ggml_tensor* out = nullptr;
-        for (int64_t c = 0; c < n; c += 16) {
-            const int64_t k = std::min<int64_t>(16, n - c);
+        for (int64_t c = 0; c < n; c += kFloatGroup) {
+            const int64_t k = std::min<int64_t>(kFloatGroup, n - c);
             ggml_tensor* xs = ggml_view_3d(ctx, x, x->ne[0], x->ne[1], k, x->nb[1], x->nb[2], (size_t) c * x->nb[2]);
             ggml_tensor* is = ggml_view_2d(ctx, ids, ids->ne[0], k, ids->nb[1], (size_t) c * ids->nb[1]);
             ggml_tensor* y = ggml_mul_mat_id(ctx, as, xs, is);
@@ -516,10 +519,21 @@ struct Builder {
 
 }  // namespace
 
+// the layers' fixed part plus what grows with T: the per-chunk gathers, the float-expert groups (a fixed budget
+// aborted in ggml_new_object once --ubatch outgrew it)
+size_t GlmMetal::Impl::graph_size(int T) const {
+    const size_t dsa = (size_t) std::count(g.recurrent.begin(), g.recurrent.end(), 0);
+    const size_t moe = g.recurrent.size() - (size_t) g.n_dense_lead;
+    const size_t chunk = (size_t) std::max(1, o.attn_chunk);
+    return kGraphNodes + dsa * (((size_t) T + chunk - 1) / chunk) * kChunkTensors +
+           moe * (((size_t) T + kFloatGroup - 1) / kFloatGroup) * kGroupTensors;
+}
+
 bool GlmMetal::Impl::run_slice(const int32_t* tok, int T, std::vector<float>& logits, std::string& err, bool window) {
     std::vector<float> emb;
     if (!embed(tok, T, emb, err)) return false;
-    const size_t mem = ggml_tensor_overhead() * kGraphNodes + ggml_graph_overhead_custom(kGraphNodes, false);
+    const size_t nodes = graph_size(T);
+    const size_t mem = ggml_tensor_overhead() * nodes + ggml_graph_overhead_custom(nodes, false);
     if (arena.size() < mem) arena.resize(mem);
     std::vector<int32_t> slots;
     int moe = -1;   // the MoE layer whose experts open the next graph
@@ -527,7 +541,7 @@ bool GlmMetal::Impl::run_slice(const int32_t* tok, int T, std::vector<float>& lo
         const auto th = std::chrono::steady_clock::now();
         ggml_init_params ip{mem, arena.data(), true};
         ggml_context* ctx = ggml_init(ip);
-        Builder b{*this, g, ctx, ggml_new_graph_custom(ctx, kGraphNodes, false), T, pos, window, emb.data(), {}, {}};
+        Builder b{*this, g, ctx, ggml_new_graph_custom(ctx, nodes, false), T, pos, window, emb.data(), {}, {}};
         ggml_tensor* R;
         int il;
         if (moe < 0) {
@@ -574,7 +588,8 @@ bool GlmMetal::Impl::run_slice(const int32_t* tok, int T, std::vector<float>& lo
         }
         st.gpu_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         if (std::getenv("MAYA_METAL_PROFILE"))
-            std::fprintf(stderr, "slice T=%d%s nodes %d %.1f ms\n", T, window ? " window" : "", ggml_graph_n_nodes(b.gf),
+            std::fprintf(stderr, "slice T=%d%s nodes %d tensors %zu/%zu %.1f ms\n", T, window ? " window" : "",
+                         ggml_graph_n_nodes(b.gf), ggml_used_mem(ctx) / ggml_tensor_overhead(), nodes,
                          std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
         for (const auto& [name, t] : b.dumps) {
             std::vector<float> v((size_t) ggml_nelements(t));
