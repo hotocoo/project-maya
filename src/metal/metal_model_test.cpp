@@ -56,6 +56,7 @@ void load(GlmMetal& m, const std::string& gguf, int64_t ctx, int max_window = 0,
     if (env("MAYA_METAL_ATTN_CHUNK") > 0) o.attn_chunk = env("MAYA_METAL_ATTN_CHUNK");
     o.kv_f16 = env("MAYA_METAL_KV_F16") != 0;
     if (const char* v = std::getenv("MAYA_METAL_DSA_MM"); v && *v) o.dsa_mm = std::atoi(v) != 0;
+    if (const char* v = std::getenv("MAYA_METAL_DSA_KERNEL"); v && *v) o.dsa_kernel = std::atoi(v) != 0;
     if (dsa_matvec) o.dsa_mm = false;
     m.set_options(o);
     std::string err;

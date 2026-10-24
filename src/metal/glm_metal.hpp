@@ -65,7 +65,10 @@ struct GlmOptions {
     int n_ubatch = 512;               // tokens per forward slice
     int attn_chunk = 32;              // tokens per sparse-attention gather inside a slice
     bool dsa_mm = true;               // DSA products with the heads as matrix columns (ggml-metal's mul_mm, half
-                                      // tiles; ~1.6x prefill); false: one f32 matvec per head (MAYA_METAL_DSA_MM=0)
+                                      // tiles); false: one f32 matvec per head (MAYA_METAL_DSA_MM=0)
+    bool dsa_kernel = true;           // with dsa_mm, the F16 latent and a ggml built with metal-sparse-mla.patch: the
+                                      // sparse attention as one kernel reading the cache rows in place (no gather, no
+                                      // transpose; MAYA_METAL_DSA_KERNEL=0 keeps the gather + mul_mm)
     bool kv_f16 = false;              // MLA latent cache in F16 (as llama.cpp and the CUDA engine; half the bytes,
                                       // ~1e-4 logit error on the fixtures); default F32: ~1e-6.  On the GPU with
                                       // dsa_mm the latent is F16 regardless (mul_mm rounds it to half anyway)

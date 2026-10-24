@@ -44,7 +44,51 @@ else()
   endif()
   set(_maya_llamacpp_dir ${maya_llamacpp_SOURCE_DIR})
 endif()
-add_subdirectory(${_maya_llamacpp_dir}/ggml ${CMAKE_BINARY_DIR}/ggml EXCLUDE_FROM_ALL)
+# ggml is built from a copy in the build tree with third_party/ggml/metal-sparse-mla.patch applied (ggml_sparse_mla:
+# the DSA layers' sparse attention as one Metal kernel; the checkout stays untouched).  The copy is redone when the
+# checkout, its ggml.h or the patch changes.  A checkout the patch does not apply to (or no git) builds as it is, and the
+# engine keeps its gather + mul_mm attention.
+set(_maya_gg ${_maya_llamacpp_dir}/ggml)
+set(_maya_mla_patch ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml/metal-sparse-mla.patch)
+set(_maya_mla_copy ${CMAKE_BINARY_DIR}/maya-ggml)
+file(SHA256 ${_maya_mla_patch} _maya_mla_patch_sha)
+file(SHA256 ${_maya_gg}/include/ggml.h _maya_mla_src_sha)
+set(_maya_mla_stamp "${_maya_gg}|${_maya_mla_src_sha}|${_maya_mla_patch_sha}")
+set(_maya_mla_done "")
+if(EXISTS ${_maya_mla_copy}/.maya-stamp)
+  file(READ ${_maya_mla_copy}/.maya-stamp _maya_mla_done)
+endif()
+set(_maya_mla ON)
+if(NOT _maya_mla_done STREQUAL _maya_mla_stamp)
+  find_package(Git)
+  if(NOT GIT_FOUND)
+    message(WARNING "git was not found to apply third_party/ggml/metal-sparse-mla.patch: ggml is built as it is, and the "
+                    "DSA layers keep the gather + mul_mm attention")
+    set(_maya_mla OFF)
+  else()
+    file(REMOVE_RECURSE ${_maya_mla_copy})
+    file(COPY ${_maya_gg}/ DESTINATION ${_maya_mla_copy})
+    # (GIT_CEILING_DIRECTORIES: git applies the patch as a plain patch tool, not inside the repository holding the
+    # build tree)
+    execute_process(COMMAND ${CMAKE_COMMAND} -E env GIT_CEILING_DIRECTORIES=${CMAKE_BINARY_DIR}
+                            ${GIT_EXECUTABLE} apply --ignore-whitespace ${_maya_mla_patch}
+                    WORKING_DIRECTORY ${_maya_mla_copy} RESULT_VARIABLE _maya_mla_rc ERROR_VARIABLE _maya_mla_err)
+    if(_maya_mla_rc EQUAL 0)
+      file(WRITE ${_maya_mla_copy}/.maya-stamp "${_maya_mla_stamp}")
+    else()
+      message(WARNING "third_party/ggml/metal-sparse-mla.patch (made for the pinned ggml) does not apply to ${_maya_gg} - "
+                      "it is built as it is, and the DSA layers keep the gather + mul_mm attention:\n${_maya_mla_err}")
+      file(REMOVE_RECURSE ${_maya_mla_copy})
+      set(_maya_mla OFF)
+    endif()
+  endif()
+endif()
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_maya_mla_patch} ${_maya_gg}/include/ggml.h)
+if(_maya_mla)
+  add_subdirectory(${_maya_mla_copy} ${CMAKE_BINARY_DIR}/ggml EXCLUDE_FROM_ALL)
+else()
+  add_subdirectory(${_maya_gg} ${CMAKE_BINARY_DIR}/ggml EXCLUDE_FROM_ALL)
+endif()
 
 # the engine reports Maya's release (VERSION) as its version
 file(STRINGS ${CMAKE_CURRENT_SOURCE_DIR}/VERSION _maya_version LIMIT_COUNT 1)
@@ -53,6 +97,9 @@ add_library(maya_metal STATIC src/metal/glm_metal.cpp src/metal/glm_metal_load.c
 target_include_directories(maya_metal PUBLIC src/metal)
 target_compile_definitions(maya_metal PUBLIC MAYA_VERSION="${_maya_version}")
 target_link_libraries(maya_metal PUBLIC ggml ggml-base ggml-cpu ggml-metal)
+if(_maya_mla)
+  target_compile_definitions(maya_metal PRIVATE MAYA_METAL_SPARSE_MLA=1)
+endif()
 
 add_executable(maya-metal src/metal/main.cpp src/metal/serve.cpp)
 target_link_libraries(maya-metal PRIVATE maya_metal)
@@ -136,9 +183,15 @@ if(MAYA_METAL_TESTS)
     add_test(NAME metal_wide_gen
              COMMAND ${MAYA_PYTHON3} ${CMAKE_CURRENT_SOURCE_DIR}/tools/glm_mtp_fixture.py --wide --no-nextn
                      --out ${CMAKE_CURRENT_BINARY_DIR}/glm5-wide.gguf)
-    set_tests_properties(metal_wide_gen PROPERTIES FIXTURES_SETUP metal_mtp_gguf)
+    add_test(NAME metal_wide512_gen
+             COMMAND ${MAYA_PYTHON3} ${CMAKE_CURRENT_SOURCE_DIR}/tools/glm_mtp_fixture.py --wide 512 --no-nextn
+                     --out ${CMAKE_CURRENT_BINARY_DIR}/glm5-wide512.gguf)
+    set_tests_properties(metal_wide_gen metal_wide512_gen PROPERTIES FIXTURES_SETUP metal_mtp_gguf)
     add_test(NAME metal_model_wide_prefill COMMAND metal_model_test prefill ${CMAKE_CURRENT_BINARY_DIR}/glm5-wide.gguf 300)
-    set_tests_properties(metal_model_wide_prefill PROPERTIES ENVIRONMENT "MAYA_METAL_ATTN_CHUNK=5"
+    # (the 512-wide latent: ggml_sparse_mla's D=512 kernel, the engine's own latent width)
+    add_test(NAME metal_model_wide512_prefill
+             COMMAND metal_model_test prefill ${CMAKE_CURRENT_BINARY_DIR}/glm5-wide512.gguf 300)
+    set_tests_properties(metal_model_wide_prefill metal_model_wide512_prefill PROPERTIES ENVIRONMENT "MAYA_METAL_ATTN_CHUNK=5"
                          WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} FIXTURES_REQUIRED metal_mtp_gguf)
     set_tests_properties(metal_model_big_prefill metal_model_big_prefill_evict PROPERTIES
                          WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} FIXTURES_REQUIRED metal_mtp_gguf TIMEOUT 3600)

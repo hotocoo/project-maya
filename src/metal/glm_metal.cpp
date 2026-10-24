@@ -29,6 +29,10 @@ constexpr int kFloatGroup = 16;     // tokens per mul_mat_id of float experts (m
 constexpr int kChunkTensors = 48;   // a DSA layer's tensors per attn_chunk gather (35 measured)
 constexpr int kGroupTensors = 16;   // a MoE layer's tensors per float-expert group (12: 4 each for gate, up, down)
 constexpr int64_t kMmMinK = 64;     // ggml-metal takes mul_mm only from this inner length (ggml_metal_op_mul_mat_use_mm)
+constexpr int kSparseMinT = 17;     // slices from this length take ggml_sparse_mla: its 8-head threadgroups leave the GPU
+                                    // idle on a token (decode) or a verify window (at most 16), which keep mul_mm
+constexpr size_t kSparseScoreBytes = (size_t) 256 << 20;   // ggml_sparse_mla gathers nothing: its chunks are sized by
+                                                           // the indexer's scores ([n_pool, heads, tokens] f32) instead
 
 struct Upload {
     ggml_tensor* t;
@@ -279,7 +283,14 @@ struct Builder {
         // (masked): below it the second product would switch to ggml-metal's f32 matvec, and a cold and a warm prompt,
         // sliced differently, would gather the same token with different kernels
         const int64_t n_core = kp * n_top + n_tail + 1;
-        const int64_t n_sel = m.o.dsa_mm ? std::max(n_core, kMmMinK) : n_core;
+#ifdef MAYA_METAL_SPARSE_MLA
+        // ggml_sparse_mla (third_party/ggml/metal-sparse-mla.patch): its Metal kernel takes these head sizes
+        const bool fused = m.o.dsa_mm && m.o.dsa_kernel && T >= kSparseMinT && s.lat->type == GGML_TYPE_F16 &&
+                           (kv == 64 || kv == 128 || kv == 256 || kv == 512);
+#else
+        const bool fused = false;
+#endif
+        const int64_t n_sel = m.o.dsa_mm && !fused ? std::max(n_core, kMmMinK) : n_core;
         const int64_t n_fill = n_sel - kp * n_top;   // the host-known cells: tail, null, padding
 
         ggml_tensor* iq = ggml_reshape_3d(ctx, mm(m.wl(il, "indexer.attn_q_b.weight"), qr), kd, ih, T);
@@ -289,8 +300,22 @@ struct Builder {
         ggml_tensor* pooled_all = n_pool > 0
             ? ggml_view_3d(ctx, s.pooled, kd, n_pool, 1, s.pooled->nb[1], s.pooled->nb[1] * n_pool, 0) : nullptr;
 
-        std::vector<ggml_tensor*> outs;
-        const int chunk = std::max(1, m.o.attn_chunk);
+        // the chunks' outputs, merged as they come like a binary counter (two of the same size become one): a running
+        // concat copies everything before each chunk again, and holding every chunk's output to the end fragments the
+        // graph allocator (a 2048-token slice in 4-token chunks ran out of its free blocks)
+        std::vector<std::pair<ggml_tensor*, int>> outs;   // (output, merges)
+        auto push = [&](ggml_tensor* o) {
+            outs.push_back({o, 0});
+            while (outs.size() >= 2 && outs[outs.size() - 1].second == outs[outs.size() - 2].second) {
+                auto [b, lb] = outs.back();
+                outs.pop_back();
+                outs.back() = {ggml_concat(ctx, outs.back().first, b, 3), lb + 1};
+            }
+        };
+        int chunk = std::max(1, m.o.attn_chunk);
+        if (fused)
+            chunk = (int) std::clamp<int64_t>((int64_t) (kSparseScoreBytes / ((size_t) std::max<int64_t>(1, n_pool) * ih * 4)),
+                                              chunk, T);
         for (int c0 = 0; c0 < T; c0 += chunk) {
             const int tc = std::min(chunk, T - c0);
             // host-known parts of the selection: the tail cells, the null cell, the live/dead mask
@@ -341,6 +366,14 @@ struct Builder {
                 sel = ggml_reshape_2d(ctx, sel, kp * n_top, tc);
                 idx = ggml_concat(ctx, sel, tail_t, 0);
             }
+#ifdef MAYA_METAL_SPARSE_MLA
+            if (fused) {   // every head of a token reads its selected cache rows in place, once per 8 heads
+                ggml_tensor* qz = ggml_view_3d(ctx, qa, kv, nh, tc, qa->nb[1], qa->nb[2], (size_t) c0 * qa->nb[2]);
+                ggml_tensor* o = ggml_sparse_mla(ctx, qz, s.lat, idx, ggml_reshape_2d(ctx, mask_t, n_sel, tc), kq_scale);
+                push(ggml_reshape_4d(ctx, o, kv, nh, 1, tc));   // [kv, nh, 1, tc]
+                continue;
+            }
+#endif
             ggml_tensor* kg = ggml_get_rows(ctx, s.lat, ggml_reshape_1d(ctx, idx, n_sel * tc));   // [kv, n_sel*tc]
             kg = ggml_reshape_4d(ctx, kg, kv, n_sel, 1, tc);
             ggml_tensor* qc = ggml_view_3d(ctx, qa, kv, nh, tc, qa->nb[1], qa->nb[2], (size_t) c0 * qa->nb[2]);
@@ -361,12 +394,14 @@ struct Builder {
                 kq = ggml_soft_max_ext(ctx, kq, mask_t, kq_scale, 0.0f);
                 o = mm(vt, kq);                                                          // [kv, 1, nh, tc]
             }
-            outs.push_back(o);
+            push(o);
         }
-        // pairwise: a running concat copies everything before each chunk again (quadratic in the slice's chunks)
-        for (size_t w = 1; w < outs.size(); w *= 2)
-            for (size_t i = 0; i + w < outs.size(); i += 2 * w) outs[i] = ggml_concat(ctx, outs[i], outs[i + w], 3);
-        ggml_tensor* o = ggml_reshape_3d(ctx, outs[0], kv, nh, T);
+        while (outs.size() >= 2) {   // the unequal rest, newest first
+            ggml_tensor* b = outs.back().first;
+            outs.pop_back();
+            outs.back().first = ggml_concat(ctx, outs.back().first, b, 3);
+        }
+        ggml_tensor* o = ggml_reshape_3d(ctx, outs[0].first, kv, nh, T);
         o = mm(m.wl(il, "attn_v_b.weight"), ggml_permute(ctx, o, 0, 2, 1, 3));   // [v, T, nh]
         o = ggml_cont_2d(ctx, ggml_permute(ctx, o, 0, 2, 1, 3), (int64_t) g.head_v_mla * nh, T);
         cb(o, "kqv_out", il);
