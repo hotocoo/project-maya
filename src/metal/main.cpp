@@ -30,7 +30,8 @@ void usage() {
                  "  --expert-profile F   ranked expert profile that fills the pool at load (data/expert-profile-glm.bin)\n"
                  "  --expert-profile-save F  this Mac's learned profile: read instead when it exists, rewritten after\n"
                  "                       each request\n"
-                 "  --kv-f16             MLA latent cache in F16 (half the bytes; default F32)\n"
+                 "  --kv-f16             MLA latent cache in F16 (half the bytes; default F32, F16 on the GPU)\n"
+                 "  --kv-f32             keep the MLA latent cache F32 on the GPU too (MAYA_METAL_KV_F32=1)\n"
                  "  --no-mtp             no MTP drafting (the NextN block is not loaded)\n"
                  "  --dflash F           draft with this DFlash2 drafter GGUF instead of the NextN block\n"
                  "  --cpu                run on ggml-cpu instead of the GPU (reference runs)\n");
@@ -59,6 +60,7 @@ int main(int argc, char** argv) {
     o.mtp = std::getenv("MAYA_GLM_NO_MTP") == nullptr && std::getenv("MAYA_GLM_NO_SPEC") == nullptr;
     if (const char* v = std::getenv("MAYA_METAL_DSA_MM"); v && *v) o.dsa_mm = std::atoi(v) != 0;
     if (const char* v = std::getenv("MAYA_METAL_DSA_KERNEL"); v && *v) o.dsa_kernel = std::atoi(v) != 0;
+    if (const char* v = std::getenv("MAYA_METAL_KV_F32"); v && *v) o.kv_f32 = std::atoi(v) != 0;
     std::vector<std::string> rest;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -83,6 +85,7 @@ int main(int argc, char** argv) {
         else if (a == "--expert-profile-save") o.expert_profile_save = next();
         else if (a == "--threads") o.cpu_threads = std::atoi(next());
         else if (a == "--kv-f16") o.kv_f16 = true;
+        else if (a == "--kv-f32") o.kv_f32 = true;
         else if (a == "--cpu") o.use_gpu = false;
         else if (a == "--no-mtp") o.mtp = false;
         else if (a == "--dflash") o.dflash = next();

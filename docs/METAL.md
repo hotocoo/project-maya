@@ -97,6 +97,8 @@ Two choices keep it at f32 accuracy where Metal would otherwise round:
   projections) therefore run as f32 matrix-vector products, one per token, so a prompt and a decode step give the
   same bits. Quantized weights use ggml-metal's matrix kernels as llama.cpp does.
 - The MLA latent cache is F32 by default (about 22 KB per token; `--kv-f16` halves it, as the CUDA engine stores it).
+  On the GPU the DSA layers' matrix products round it to half anyway, so it is F16 there; `--kv-f32`
+  (`MAYA_METAL_KV_F32=1`) keeps it F32, and the fused sparse-attention kernel then reads F32 rows.
 
 ## Options
 
@@ -109,6 +111,7 @@ Two choices keep it at f32 accuracy where Metal would otherwise round:
 | `--expert-profile F` | the ranked expert profile that fills the pool at start (set by the setup) |
 | `--io-threads N` | parallel SSD reads for expert misses (default 16) |
 | `--kv-f16` | the MLA latent cache in F16 |
+| `--kv-f32` | keep the MLA latent cache F32 on the GPU too (twice the cache memory; for accuracy A/B runs) |
 | `--cpu` | run on the CPU through ggml-cpu (reference runs) |
 
 `maya-metal --gguf MODEL.gguf --ids 1,2,3 --n 64` decodes 64 tokens greedily from those token ids and prints the

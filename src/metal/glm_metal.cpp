@@ -284,8 +284,9 @@ struct Builder {
         // sliced differently, would gather the same token with different kernels
         const int64_t n_core = kp * n_top + n_tail + 1;
 #ifdef MAYA_METAL_SPARSE_MLA
-        // ggml_sparse_mla (third_party/ggml/metal-sparse-mla.patch): its Metal kernel takes these head sizes
-        const bool fused = m.o.dsa_mm && m.o.dsa_kernel && T >= kSparseMinT && s.lat->type == GGML_TYPE_F16 &&
+        // ggml_sparse_mla (third_party/ggml/metal-sparse-mla.patch): its Metal kernel (no ggml-cpu one) takes these
+        // head sizes and an F16 or F32 latent
+        const bool fused = m.o.use_gpu && m.o.dsa_mm && m.o.dsa_kernel && T >= kSparseMinT &&
                            (kv == 64 || kv == 128 || kv == 256 || kv == 512);
 #else
         const bool fused = false;
@@ -314,8 +315,8 @@ struct Builder {
         };
         int chunk = std::max(1, m.o.attn_chunk);
         if (fused)
-            chunk = (int) std::clamp<int64_t>((int64_t) (kSparseScoreBytes / ((size_t) std::max<int64_t>(1, n_pool) * ih * 4)),
-                                              chunk, T);
+            chunk = (int) std::min<int64_t>(
+                T, std::max<int64_t>(chunk, (int64_t) (kSparseScoreBytes / ((size_t) std::max<int64_t>(1, n_pool) * ih * 4))));
         for (int c0 = 0; c0 < T; c0 += chunk) {
             const int tc = std::min(chunk, T - c0);
             // host-known parts of the selection: the tail cells, the null cell, the live/dead mask

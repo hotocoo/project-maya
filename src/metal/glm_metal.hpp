@@ -67,12 +67,14 @@ struct GlmOptions {
     int attn_chunk = 32;              // tokens per sparse-attention gather inside a slice
     bool dsa_mm = true;               // DSA products with the heads as matrix columns (ggml-metal's mul_mm, half
                                       // tiles); false: one f32 matvec per head (MAYA_METAL_DSA_MM=0)
-    bool dsa_kernel = true;           // with dsa_mm, the F16 latent and a ggml built with metal-sparse-mla.patch: the
+    bool dsa_kernel = true;           // with dsa_mm and a ggml built with metal-sparse-mla.patch: the
                                       // sparse attention as one kernel reading the cache rows in place (no gather, no
                                       // transpose; MAYA_METAL_DSA_KERNEL=0 keeps the gather + mul_mm)
     bool kv_f16 = false;              // MLA latent cache in F16 (as llama.cpp and the CUDA engine; half the bytes,
                                       // ~1e-4 logit error on the fixtures); default F32: ~1e-6.  On the GPU with
-                                      // dsa_mm the latent is F16 regardless (mul_mm rounds it to half anyway)
+                                      // dsa_mm the latent is F16 unless kv_f32 (mul_mm rounds it to half anyway)
+    bool kv_f32 = false;              // keep the latent F32 on the GPU with dsa_mm too: the fused kernel reads F32 rows
+                                      // (--kv-f32 / MAYA_METAL_KV_F32=1; twice the cache bytes, for A/B runs)
     size_t expert_budget = 0;         // bytes for the routed-expert pool; 0: derive from the GPU's working set
     int pool_slots = 0;               // >0: force this many slots per expert group (tests)
     int io_threads = 16;

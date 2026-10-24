@@ -17,7 +17,7 @@
 //       accepted row's logits within 1e-5 of the plain step's
 //
 // Settings (environment): MAYA_METAL_CPU=1 runs on ggml-cpu, MAYA_METAL_POOL_SLOTS=N shrinks the expert pool (the
-// eviction path), MAYA_METAL_UBATCH / MAYA_METAL_ATTN_CHUNK change the slicing, MAYA_METAL_KV_F16=1 the latent cache.
+// eviction path), MAYA_METAL_UBATCH / MAYA_METAL_ATTN_CHUNK change the slicing, MAYA_METAL_KV_F16=1 / MAYA_METAL_KV_F32=1 the latent cache.
 #include "glm_metal.hpp"
 #include "spec.hpp"
 
@@ -55,6 +55,7 @@ void load(GlmMetal& m, const std::string& gguf, int64_t ctx, int max_window = 0,
     if (env("MAYA_METAL_UBATCH") > 0) o.n_ubatch = env("MAYA_METAL_UBATCH");
     if (env("MAYA_METAL_ATTN_CHUNK") > 0) o.attn_chunk = env("MAYA_METAL_ATTN_CHUNK");
     o.kv_f16 = env("MAYA_METAL_KV_F16") != 0;
+    o.kv_f32 = env("MAYA_METAL_KV_F32") != 0;
     if (const char* v = std::getenv("MAYA_METAL_DSA_MM"); v && *v) o.dsa_mm = std::atoi(v) != 0;
     if (const char* v = std::getenv("MAYA_METAL_DSA_KERNEL"); v && *v) o.dsa_kernel = std::atoi(v) != 0;
     if (dsa_matvec) o.dsa_mm = false;

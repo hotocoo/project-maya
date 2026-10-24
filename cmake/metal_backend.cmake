@@ -191,6 +191,11 @@ if(MAYA_METAL_TESTS)
     # (the 512-wide latent: ggml_sparse_mla's D=512 kernel, the engine's own latent width)
     add_test(NAME metal_model_wide512_prefill
              COMMAND metal_model_test prefill ${CMAKE_CURRENT_BINARY_DIR}/glm5-wide512.gguf 300)
+    # the same with the latent kept F32 (--kv-f32): ggml_sparse_mla's F32 kernel
+    add_test(NAME metal_model_wide512_prefill_f32
+             COMMAND metal_model_test prefill ${CMAKE_CURRENT_BINARY_DIR}/glm5-wide512.gguf 300)
+    set_tests_properties(metal_model_wide512_prefill_f32 PROPERTIES ENVIRONMENT "MAYA_METAL_ATTN_CHUNK=5;MAYA_METAL_KV_F32=1"
+                         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} FIXTURES_REQUIRED metal_mtp_gguf)
     set_tests_properties(metal_model_wide_prefill metal_model_wide512_prefill PROPERTIES ENVIRONMENT "MAYA_METAL_ATTN_CHUNK=5"
                          WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} FIXTURES_REQUIRED metal_mtp_gguf)
     set_tests_properties(metal_model_big_prefill metal_model_big_prefill_evict PROPERTIES

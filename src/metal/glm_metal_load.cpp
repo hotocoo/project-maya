@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <regex>
 #include <thread>
@@ -31,6 +32,7 @@ std::vector<std::string> shard_paths(const std::string& path) {
     std::smatch m;
     if (!std::regex_match(path, m, re)) return {path};
     const int n = std::stoi(m[3].str());
+    if (n < 1) return {path};   // "-of-00000": not a split set (open() then names the file)
     std::vector<std::string> out;
     for (int i = 1; i <= n; ++i) {
         char buf[32];
@@ -64,7 +66,9 @@ struct Meta {
         const void* p = nullptr;
         if (t == GGUF_TYPE_ARRAY) {
             t = gguf_get_arr_type(c, id);
-            if (i >= gguf_get_arr_n(c, id)) i = gguf_get_arr_n(c, id) - 1;
+            const size_t n = gguf_get_arr_n(c, id);
+            if (n == 0 || t == GGUF_TYPE_STRING || t == GGUF_TYPE_ARRAY) return 0;
+            if (i >= n) i = n - 1;
             p = (const char*) gguf_get_arr_data(c, id) + i * type_size(t);
         } else {
             p = gguf_get_val_data(c, id);
@@ -144,7 +148,7 @@ bool GlmMetal::Impl::open_files(const std::string& path, std::string& err) {
 bool GlmMetal::Impl::read_geometry(std::string& err) {
     const gguf_context* c = ggufs[0];
     const int64_t a = gguf_find_key(c, "general.architecture");
-    const std::string arch = a >= 0 ? gguf_get_val_str(c, a) : "";
+    const std::string arch = a >= 0 && gguf_get_kv_type(c, a) == GGUF_TYPE_STRING ? gguf_get_val_str(c, a) : "";
     if (arch != "glm5-next" && arch != "glm5next") {
         err = "not a GLM-5.3-Flash GGUF (architecture '" + arch + "')";
         return false;
@@ -188,6 +192,12 @@ bool GlmMetal::Impl::read_geometry(std::string& err) {
     }
     if (g.hc != 4 || g.idx_kpool < 2 || g.idx_top_k % g.idx_kpool != 0) {
         err = "unsupported mHC / indexer geometry";
+        return false;
+    }
+    const auto emb = loc.find("token_embd.weight");
+    if (emb == loc.end() || !emb->second.meta || emb->second.meta->ne[0] != g.n_embd || g.n_layers <= 0 ||
+        g.n_dense_lead > g.n_layers || g.n_expert_used <= 0 || g.n_expert_used > g.n_expert) {
+        err = "inconsistent geometry (token_embd width, block, leading dense or expert counts)";
         return false;
     }
     g.mtp = o.mtp && blocks > g.n_layers;
@@ -327,7 +337,8 @@ bool GlmMetal::Impl::load_weights(std::string& err) {
     std::vector<std::pair<std::string, TensorLoc>> dense;
     for (const auto& [name, l] : loc) {
         if (name == "token_embd.weight" || name.find("_exps.") != std::string::npos) continue;
-        if (name.rfind("blk.", 0) == 0 && std::stoi(name.substr(4)) >= g.n_layers + (g.mtp ? 1 : 0)) continue;
+        if (name.rfind("blk.", 0) == 0 && std::strtol(name.c_str() + 4, nullptr, 10) >= g.n_layers + (g.mtp ? 1 : 0))
+            continue;
         dense.push_back({name, l});
     }
     std::sort(dense.begin(), dense.end(), [](const auto& x, const auto& y) { return x.first < y.first; });
@@ -488,7 +499,7 @@ bool GlmMetal::Impl::init_state(std::string& err) {
         } else {
             // dsa_mm on the GPU rounds the gathered latent to half in mul_mm's tiles anyway: keeping it in F16 loses
             // nothing more and halves the gather and its transpose (the CPU oracle keeps F32)
-            const bool lat16 = o.kv_f16 || (o.dsa_mm && gpu_dev);
+            const bool lat16 = o.kv_f16 || (o.dsa_mm && gpu_dev && !o.kv_f32);
             s.lat = ggml_new_tensor_2d(sctx, lat16 ? GGML_TYPE_F16 : GGML_TYPE_F32, g.kv_lora, n_ctx + 1);
             s.ikg = ggml_new_tensor_2d(sctx, GGML_TYPE_F32, 2 * g.idx_key, n_ctx);
             s.pooled = ggml_new_tensor_2d(sctx, GGML_TYPE_F32, g.idx_key, n_pools);
