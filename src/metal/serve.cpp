@@ -71,6 +71,13 @@ struct Input {
                 continue;
             }
             if (line == "QUIT") stop.store(true);
+            // a request's STOP / PAUSE / WRAP may come before its run() starts (the server sends one GEN at a time
+            // and drains it to DONE): the flags clear here, as the GEN arrives - and a WRAP ends one request's thinking
+            if (line.rfind("GEN", 0) == 0) {
+                stop.store(false);
+                pause.store(false);
+                wrap.store(false);
+            }
             std::lock_guard<std::mutex> lk(mu);
             q.push_back(line);
             cv.notify_all();
@@ -154,7 +161,7 @@ struct Server {
             const std::string k = tok.substr(0, eq), v = tok.substr(eq + 1);
             if (k == "temperature") {
                 sp.temperature = (float) std::atof(v.c_str());
-                if (sp.temperature <= 0.0f) greedy_req = true;
+                if (!(sp.temperature > 0.0f) || !std::isfinite(1.0f / sp.temperature)) greedy_req = true;   // NaN, 0, denormal
                 else any_key = true;
             } else if (k == "top_p") { sp.top_p = (float) std::atof(v.c_str()); any_key = true; }
             else if (k == "top_k") { sp.top_k = std::atoi(v.c_str()); any_key = true; }
@@ -269,8 +276,6 @@ struct Server {
              int32_t think_end, const Spec& spec) {
         const int spec_req = spec.req;
         const int n_vocab = model.geometry().n_vocab;
-        in.stop.store(false);
-        in.pause.store(false);
         std::string e;
         const char* finish = "length";
         const auto t0 = std::chrono::steady_clock::now();

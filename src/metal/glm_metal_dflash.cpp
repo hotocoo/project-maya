@@ -107,7 +107,7 @@ bool GlmMetal::Impl::load_dflash(std::string& err) {
     }
     const gguf_context* c = d.gguf;
     const int64_t a = gguf_find_key(c, "general.architecture");
-    if (a < 0 || std::string(gguf_get_val_str(c, a)) != "dflash" || gguf_find_key(c, "dflash.selector_rank") < 0) {
+    if (a < 0 || gguf_get_kv_type(c, a) != GGUF_TYPE_STRING || std::string(gguf_get_val_str(c, a)) != "dflash" || gguf_find_key(c, "dflash.selector_rank") < 0) {
         err = o.dflash + " is not a DFlash2 drafter";
         return false;
     }
@@ -197,6 +197,11 @@ bool GlmMetal::Impl::load_dflash(std::string& err) {
 
 bool GlmMetal::Impl::dflash_inject(int64_t p0, int n, std::string& err) {
     DFlash& d = *df;
+    // a slice longer than the ring (--ubatch past the drafter's window): its first rows would share slots with its
+    // last in one set_rows, whose GPU write order is undefined.  Only the last `ring` rows can stay anyway
+    const int skip = std::max(0, n - d.ring);
+    p0 += skip;
+    n -= skip;
     const size_t mem = ggml_tensor_overhead() * kDraftNodes + ggml_graph_overhead_custom(kDraftNodes, false);
     std::vector<uint8_t> arena(mem);
     ggml_init_params ip{mem, arena.data(), true};
@@ -212,7 +217,7 @@ bool GlmMetal::Impl::dflash_inject(int64_t p0, int n, std::string& err) {
     ggml_tensor* pt = input(ctx, up, GGML_TYPE_I32, n, 1, pos.data(), pos.size() * 4);
     pt = ggml_reshape_1d(ctx, pt, n);
     ggml_tensor* st_ = input(ctx, up, GGML_TYPE_I64, n, 1, slot.data(), slot.size() * 8);
-    ggml_tensor* f = ggml_view_2d(ctx, feat, feat->ne[0], n, feat->nb[1], 0);
+    ggml_tensor* f = ggml_view_2d(ctx, feat, feat->ne[0], n, feat->nb[1], (size_t) skip * feat->nb[1]);
     ggml_tensor* gx = rms(ctx, ggml_mul_mat(ctx, d.w.get("fc.weight"), f), d.w.get("enc.output_norm.weight"), d.eps);
     const int64_t kvw = (int64_t) d.head_dim * d.n_head_kv;
     for (int l = 0; l < d.n_layer; ++l) {
