@@ -2043,7 +2043,9 @@ def offer_download(a, quant: str, d: Path, shards: list, m: dict | None = None) 
             fail(f"{s.name} after the download: {why}", f"delete it and run {ME} --download-model again")
         want = m["sha256"].get(hf_name(m, s))
         if want and not sha256_checked(s, want):
-            fail(f"{s.name}: the sha256 does not match the published one", "delete it and download it again")
+            s.unlink(missing_ok=True)                  # complete by size but damaged: kept, it would pass as done
+            fail(f"{s.name}: the sha256 does not match the published one (the file was removed)",
+                 f"run {ME} --download-model again")
         ok(f"{s.name} downloaded")
     return True
 
@@ -3800,7 +3802,8 @@ def ds4_vision_step(a, pc: dict, d: Path) -> bool:
         return False
     for f in files:                                    # (offer_download checked the ones it fetched; these too)
         if not sha256_checked(f, m["sha256"][f.name]):
-            fail(f"{f}: the sha256 does not match the published one", "delete it and run the setup again")
+            f.unlink(missing_ok=True)                  # else the next run finds it complete and fails here again
+            fail(f"{f}: the sha256 does not match the published one (the file was removed)", "run the setup again")
     say("  Reading the picture markers (30 KB of DeepSeek's shard 2, a range request) and copying the tower into one "
         "file (exactly the same values; a few seconds) ...")
     r = run([sys.executable, str(ROOT / "tools" / "ds4" / "vision_pack.py"), "--dir", str(v)], check=False)

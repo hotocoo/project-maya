@@ -27,11 +27,13 @@ import contextlib
 import base64
 import hashlib
 import hmac
+import ipaddress
 import codecs
 import itertools
 import json
 import os
 import queue
+import socket
 import re
 import subprocess
 import sys
@@ -3139,6 +3141,32 @@ def _backlog() -> int:
         return 256
 
 
+def request_timeout() -> float:
+    """Seconds one socket read or write may wait (a client that sends half a request and nothing more must not hold a
+    thread for ever): 300 by default, STRATA_REQUEST_TIMEOUT_S changes it.  Per operation: a long answer that writes
+    nothing while it thinks is not cut."""
+    try:
+        s = float(os.environ.get("STRATA_REQUEST_TIMEOUT_S", "0"))
+    except ValueError:
+        s = 0.0
+    return s if s > 0 else 300.0
+
+
+def local_host(host: str) -> bool:
+    """A Host header naming this machine: an IP address, localhost, or this machine's own name.  A page on another
+    site that re-points its own name at 127.0.0.1 (DNS rebinding) sends that name, so it is refused."""
+    if not host:
+        return True                                     # HTTP/1.0 without Host: no browser sends that
+    name = (urlsplit("//" + host).hostname or "").rstrip(".").lower()
+    try:
+        ipaddress.ip_address(name)
+        return True
+    except ValueError:
+        pass
+    me = socket.gethostname().lower()
+    return name == "localhost" or name.endswith(".localhost") or name in (me, me.split(".")[0] + ".local", me.split(".")[0])
+
+
 def body_limit() -> int:
     """The most a request body may hold, in bytes (it is read into memory): 256 MiB, a million-token conversation with
     room to spare; STRATA_MAX_BODY_MIB changes it.  A larger one is answered 413 before it is read (Strata #893)."""
@@ -3181,6 +3209,7 @@ def make_handler(svc: Service):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.0"                       # SSE ends by closing the connection
         answer_started = False                              # a malformed request's 400 only replaces an answer not begun
+        timeout = request_timeout()
 
         def log_message(self, fmt, *args):
             pass
@@ -3271,7 +3300,11 @@ def make_handler(svc: Service):
 
         def _authorized(self) -> bool:
             if not svc.api_key:
-                return True
+                if local_host(self.headers.get("Host", "")):
+                    return True
+                self._json(403, {"error": {"type": "permission_error", "message":
+                                 "open Maya by its IP address or localhost, or set an api_key to use another name"}})
+                return False
             auth = self.headers.get("Authorization", "")
             given = auth[7:].strip() if auth.lower().startswith("bearer ") else self.headers.get("x-api-key", "")
             if given and any(hmac.compare_digest(given.encode(), k.encode()) for k in key_list(svc.api_key)):
@@ -3382,6 +3415,8 @@ def make_handler(svc: Service):
             self._json(200, out)
 
         def do_DELETE(self):
+            if self._foreign_page():
+                return
             if self.path.split("?")[0].startswith("/v1/responses/"):
                 self._response_resource(delete=True)
             elif self._authorized():
@@ -3531,8 +3566,27 @@ def make_handler(svc: Service):
             else:
                 self._json(404, {"error": {"message": "not found"}})
 
+        def _foreign_page(self) -> bool:
+            """A browser page on another site (its Origin neither this server nor in cors_origins): it can post a
+            text/plain body with no CORS preflight (CSRF), so it is refused before anything runs.  curl and the SDKs
+            send no Origin."""
+            origin = self.headers.get("Origin")
+            if not origin or origin.split("://", 1)[-1] == self.headers.get("Host", "") or self._cors_allow():
+                return False
+            self._json(403, {"error": {"type": "permission_error", "message": "requests from other web pages are "
+                                       "refused (the config's cors_origins lists the pages allowed)"}})
+            return True
+
+        def _fail(self, code, kind, message):
+            """An error as JSON, while nothing was sent; once an answer has begun (a stream), only the log has it."""
+            if self.answer_started:
+                print(f"[maya] request failed mid-answer: {message}", file=sys.stderr, flush=True)
+                self.close_connection = True
+                return
+            self._json(code, {"error": {"type": kind, "message": message}})
+
         def do_POST(self):
-            if not self._authorized():
+            if not self._authorized() or self._foreign_page():
                 return
             path = self.path.split("?")[0].rstrip("/")   # issue #55: Claude Code posts /v1/messages?beta=true
             try:
@@ -3581,19 +3635,17 @@ def make_handler(svc: Service):
                 else:
                     self._json(404, {"error": {"message": "not found"}})
             except BadBody as e:
-                self._json(e.status, {"error": {"type": "invalid_request_error", "message": str(e)}})
+                self._fail(e.status, "invalid_request_error", str(e))
             except (JobError, StoreBusy) as e:
-                self._json(getattr(e, "status", 503), {"error": {"type": "server_error", "message": str(e)}})
+                self._fail(getattr(e, "status", 503), "server_error", str(e))
             except ValueError as e:
-                self._json(400, {"error": {"type": "invalid_request_error", "message": str(e)}})
-            except EngineDied as e:                          # before the answer started (not streamed)
-                self._json(503, {"error": {"type": "server_error", "message": f"{e}; the next request restarts it"}})
+                self._fail(400, "invalid_request_error", str(e))
+            except EngineDied as e:
+                self._fail(503, "server_error", f"{e}; the next request restarts it")
             except (KeyError, TypeError, AttributeError, IndexError) as e:
                 # a field of the wrong shape (Strata: a 400 with the traceback in the log, not a dropped connection)
                 traceback.print_exc()
-                if not self.answer_started:
-                    self._json(400, {"error": {"type": "invalid_request_error",
-                                               "message": f"malformed request ({type(e).__name__}: {e})"}})
+                self._fail(400, "invalid_request_error", f"malformed request ({type(e).__name__}: {e})")
 
         def _props(self):
             model = parse_qs(urlsplit(self.path).query).get("model", [svc.model])[0]
