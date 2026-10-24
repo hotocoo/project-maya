@@ -45,7 +45,7 @@ int env(const char* k) {
 }
 
 void load(GlmMetal& m, const std::string& gguf, int64_t ctx, int max_window = 0, bool mtp = false,
-          const std::string& dflash = "") {
+          const std::string& dflash = "", bool dsa_matvec = false) {
     maya::metal::GlmOptions o;
     o.max_window = max_window;
     o.mtp = mtp;
@@ -55,6 +55,8 @@ void load(GlmMetal& m, const std::string& gguf, int64_t ctx, int max_window = 0,
     if (env("MAYA_METAL_UBATCH") > 0) o.n_ubatch = env("MAYA_METAL_UBATCH");
     if (env("MAYA_METAL_ATTN_CHUNK") > 0) o.attn_chunk = env("MAYA_METAL_ATTN_CHUNK");
     o.kv_f16 = env("MAYA_METAL_KV_F16") != 0;
+    if (const char* v = std::getenv("MAYA_METAL_DSA_MM"); v && *v) o.dsa_mm = std::atoi(v) != 0;
+    if (dsa_matvec) o.dsa_mm = false;
     m.set_options(o);
     std::string err;
     require(m.load(gguf, ctx, err), "load " + gguf + ": " + err);
@@ -359,8 +361,15 @@ int prefill(const std::string& gguf, int T) {
     const double k = kl(batched.data(), streamed.data(), V);
     require(argmax(batched.data(), V) == argmax(streamed.data(), V), "the prompt's argmax differs from streaming's");
     require(k < 1e-3, "the prompt's logits drift from streaming's (KL " + std::to_string(k) + ")");
-    std::printf("metal_model_test prefill: PASS (%d tokens, KL %.1e, max|d| %.1e)\n", T, k,
-                max_abs(batched.data(), streamed.data(), V));
+    // the DSA products as matrices (dsa_mm: half tiles) against the per-head f32 matvecs they replace
+    GlmMetal mv;
+    load(mv, gguf, 2048, 0, false, "", true);
+    const std::vector<float> matvec = fwd(mv, toks);
+    const double kmv = kl(batched.data(), matvec.data(), V);
+    require(argmax(batched.data(), V) == argmax(matvec.data(), V), "the prompt's argmax differs from the matvec DSA's");
+    require(kmv < 1e-3, "the prompt's logits drift from the matvec DSA's (KL " + std::to_string(kmv) + ")");
+    std::printf("metal_model_test prefill: PASS (%d tokens, KL %.1e, max|d| %.1e; matvec DSA KL %.1e)\n", T, k,
+                max_abs(batched.data(), streamed.data(), V), kmv);
     return 0;
 }
 

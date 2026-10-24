@@ -64,8 +64,11 @@ struct GlmOptions {
     bool use_gpu = true;              // false: ggml-cpu only (the oracle the Metal path is checked against)
     int n_ubatch = 512;               // tokens per forward slice
     int attn_chunk = 32;              // tokens per sparse-attention gather inside a slice
+    bool dsa_mm = true;               // DSA products with the heads as matrix columns (ggml-metal's mul_mm, half
+                                      // tiles; ~1.6x prefill); false: one f32 matvec per head (MAYA_METAL_DSA_MM=0)
     bool kv_f16 = false;              // MLA latent cache in F16 (as llama.cpp and the CUDA engine; half the bytes,
-                                      // ~1e-4 logit error on the fixtures); default F32: ~1e-6
+                                      // ~1e-4 logit error on the fixtures); default F32: ~1e-6.  On the GPU with
+                                      // dsa_mm the latent is F16 regardless (mul_mm rounds it to half anyway)
     size_t expert_budget = 0;         // bytes for the routed-expert pool; 0: derive from the GPU's working set
     int pool_slots = 0;               // >0: force this many slots per expert group (tests)
     int io_threads = 16;

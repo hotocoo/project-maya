@@ -66,12 +66,40 @@ try:                        # Project Maya's release (the dashboard's About; the
     MAYA_VERSION = (ROOT / "VERSION").read_text(encoding="utf-8").strip() or None
 except OSError:
     MAYA_VERSION = None
+MAC_FREE_SETTLE_BYTES = 1 << 30    # macOS: the old engine's memory is back once free memory rises by less than this ...
+MAC_FREE_POLL_S = 0.5              # ... between two reads this far apart
+
+
+def mac_free_bytes() -> int | None:
+    """What macOS could give a process now (vm_stat: free, inactive, purgeable and speculative pages), as maya-metal's
+    free_memory() counts it; None when vm_stat can't say."""
+    try:
+        out = subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    size = re.search(r"page size of (\d+) bytes", out)
+    counts = [re.search(rf"^Pages {k}:\s+(\d+)", out, re.M) for k in ("free", "inactive", "purgeable", "speculative")]
+    if not size or not all(counts):
+        return None
+    return sum(int(c.group(1)) for c in counts) * int(size.group(1))
+
+
 def wait_gpu_release(pid: int, timeout: float = 60.0):
     """An engine that has ended still holds its GPU memory for a few seconds - the driver frees tens of GB of VRAM and
     its pinned RAM tier after the process is gone - and an engine started at once finds the cards full (the split
     search measures them before anything loads: the context reload's new engine got 0.09 GB and failed).  Waits until
-    no GPU lists the process any more (NVML), or a few seconds where NVML can't say (AMD)."""
-    if sys.platform == "darwin":            # Metal: unified memory goes back with the process, no GPU lists it
+    no GPU lists the process any more (NVML), or a few seconds where NVML can't say (AMD).  On a Mac no GPU lists it,
+    but its unified memory comes back over seconds too, and maya-metal sizes its expert pool from what is free when it
+    starts (a restart after a crash came back with a smaller pool, partly streaming from the SSD and MTP off): waits
+    until free memory stops rising."""
+    if sys.platform == "darwin":
+        t0, prev = time.time(), mac_free_bytes()
+        while prev is not None and time.time() - t0 < timeout:
+            time.sleep(MAC_FREE_POLL_S)
+            cur = mac_free_bytes()
+            if cur is None or cur - prev < MAC_FREE_SETTLE_BYTES:
+                break
+            prev = cur
         return
     try:
         from serve.telemetry import gpu_pids

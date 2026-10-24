@@ -132,6 +132,14 @@ if(MAYA_METAL_TESTS)
     add_test(NAME metal_model_big_prefill_evict
              COMMAND metal_model_test prefill ${CMAKE_CURRENT_BINARY_DIR}/glm5-big-q8.gguf 512)
     set_tests_properties(metal_model_big_prefill_evict PROPERTIES ENVIRONMENT "MAYA_METAL_POOL_SLOTS=1")
+    # 16 heads: the DSA products take ggml-metal's mul_mm (dsa_mm), the gathers padded and not, tails of 1-4 tokens
+    add_test(NAME metal_wide_gen
+             COMMAND ${MAYA_PYTHON3} ${CMAKE_CURRENT_SOURCE_DIR}/tools/glm_mtp_fixture.py --wide --no-nextn
+                     --out ${CMAKE_CURRENT_BINARY_DIR}/glm5-wide.gguf)
+    set_tests_properties(metal_wide_gen PROPERTIES FIXTURES_SETUP metal_mtp_gguf)
+    add_test(NAME metal_model_wide_prefill COMMAND metal_model_test prefill ${CMAKE_CURRENT_BINARY_DIR}/glm5-wide.gguf 300)
+    set_tests_properties(metal_model_wide_prefill PROPERTIES ENVIRONMENT "MAYA_METAL_ATTN_CHUNK=5"
+                         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} FIXTURES_REQUIRED metal_mtp_gguf)
     set_tests_properties(metal_model_big_prefill metal_model_big_prefill_evict PROPERTIES
                          WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} FIXTURES_REQUIRED metal_mtp_gguf TIMEOUT 3600)
     set_tests_properties(metal_model_mtp metal_model_big_mtp metal_model_big_mtp_evict PROPERTIES

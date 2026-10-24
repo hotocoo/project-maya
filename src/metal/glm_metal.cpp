@@ -28,6 +28,7 @@ constexpr int kGraphNodes = 32768;
 constexpr int kFloatGroup = 16;     // tokens per mul_mat_id of float experts (mm_id)
 constexpr int kChunkTensors = 48;   // a DSA layer's tensors per attn_chunk gather (35 measured)
 constexpr int kGroupTensors = 16;   // a MoE layer's tensors per float-expert group (12: 4 each for gate, up, down)
+constexpr int64_t kMmMinK = 64;     // ggml-metal takes mul_mm only from this inner length (ggml_metal_op_mul_mat_use_mm)
 
 struct Upload {
     ggml_tensor* t;
@@ -274,7 +275,12 @@ struct Builder {
         const int64_t n_pool = (p0 + T) / kp;
         const int64_t n_top = std::min<int64_t>(n_pool, g.idx_top_k / kp);
         const int64_t n_tail = g.idx_select_tail ? kp - 1 : 0;
-        const int64_t n_sel = kp * n_top + n_tail + 1;   // + the null cell: a token with no visible cell reads 0
+        // + the null cell: a token with no visible cell reads 0.  dsa_mm pads the cells to kMmMinK with more null cells
+        // (masked): below it the second product would switch to ggml-metal's f32 matvec, and a cold and a warm prompt,
+        // sliced differently, would gather the same token with different kernels
+        const int64_t n_core = kp * n_top + n_tail + 1;
+        const int64_t n_sel = m.o.dsa_mm ? std::max(n_core, kMmMinK) : n_core;
+        const int64_t n_fill = n_sel - kp * n_top;   // the host-known cells: tail, null, padding
 
         ggml_tensor* iq = ggml_reshape_3d(ctx, mm(m.wl(il, "indexer.attn_q_b.weight"), qr), kd, ih, T);
         ggml_tensor* iw = ggml_scale(ctx, mm(m.wl(il, "indexer.proj.weight"), x), 1.0f / std::sqrt((float) (kd * ih)));
@@ -283,12 +289,12 @@ struct Builder {
         ggml_tensor* pooled_all = n_pool > 0
             ? ggml_view_3d(ctx, s.pooled, kd, n_pool, 1, s.pooled->nb[1], s.pooled->nb[1] * n_pool, 0) : nullptr;
 
-        ggml_tensor* outs = nullptr;
+        std::vector<ggml_tensor*> outs;
         const int chunk = std::max(1, m.o.attn_chunk);
         for (int c0 = 0; c0 < T; c0 += chunk) {
             const int tc = std::min(chunk, T - c0);
             // host-known parts of the selection: the tail cells, the null cell, the live/dead mask
-            std::vector<int32_t> tail((size_t) (n_tail + 1) * tc);
+            std::vector<int32_t> tail((size_t) n_fill * tc);
             std::vector<float> mask((size_t) n_sel * tc, -INFINITY);
             std::vector<float> pmask;   // only when some token of the chunk cannot see every pool yet
             if (n_pool > 0 && (p0 + c0 + 1) / kp < n_pool) pmask.assign((size_t) n_pool * tc, 0.0f);
@@ -300,24 +306,30 @@ struct Builder {
                 float* mk = mask.data() + (size_t) n_sel * t;
                 for (int64_t i = 0; i < live_pools * kp; ++i) mk[i] = 0.0f;
                 const int64_t tail_n = n_tail > 0 ? (p + 1) - nv * kp : 0;
-                int32_t* tl = tail.data() + (size_t) (n_tail + 1) * t;
+                int32_t* tl = tail.data() + (size_t) n_fill * t;
                 for (int64_t i = 0; i < n_tail; ++i) {
                     tl[i] = (int32_t) (i < tail_n ? nv * kp + i : null_cell);
                     if (i < tail_n) mk[kp * n_top + i] = 0.0f;
                 }
-                tl[n_tail] = (int32_t) null_cell;
-                if (live_pools == 0 && tail_n == 0) mk[n_sel - 1] = 0.0f;
+                for (int64_t i = n_tail; i < n_fill; ++i) tl[i] = (int32_t) null_cell;
+                if (live_pools == 0 && tail_n == 0) mk[kp * n_top + n_tail] = 0.0f;
                 if (!pmask.empty())
                     for (int64_t q2 = nv; q2 < n_pool; ++q2) pmask[(size_t) n_pool * t + (size_t) q2] = -INFINITY;
             }
-            ggml_tensor* tail_t = input(GGML_TYPE_I32, n_tail + 1, tc, tail.data(), tail.size() * 4);
+            ggml_tensor* tail_t = input(GGML_TYPE_I32, n_fill, tc, tail.data(), tail.size() * 4);
             ggml_tensor* mask_t = input(GGML_TYPE_F32, n_sel, 1, mask.data(), mask.size() * 4, 1, tc);
 
             ggml_tensor* idx = tail_t;
             if (n_top > 0) {
                 ggml_tensor* iqc = ggml_view_3d(ctx, iq, kd, ih, tc, iq->nb[1], iq->nb[2], (size_t) c0 * iq->nb[2]);
-                ggml_tensor* kq = mm(pooled_all, ggml_permute(ctx, iqc, 0, 2, 1, 3));   // [n_pool, tc, ih]
-                kq = ggml_cont(ctx, ggml_permute(ctx, kq, 2, 1, 0, 3));                                // [ih, tc, n_pool]
+                ggml_tensor* kq;
+                if (m.o.dsa_mm) {   // the indexer heads are the columns: the same kernel whatever tc is
+                    kq = ggml_mul_mat(ctx, pooled_all, iqc);                                       // [n_pool, ih, tc]
+                    kq = ggml_cont(ctx, ggml_permute(ctx, kq, 2, 0, 1, 3));                        // [ih, tc, n_pool]
+                } else {
+                    kq = mm(pooled_all, ggml_permute(ctx, iqc, 0, 2, 1, 3));                       // [n_pool, tc, ih]
+                    kq = ggml_cont(ctx, ggml_permute(ctx, kq, 2, 1, 0, 3));                        // [ih, tc, n_pool]
+                }
                 ggml_tensor* sc = ggml_mul(ctx, ggml_relu(ctx, kq), cols(iw, tc, c0));
                 sc = ggml_cont(ctx, ggml_permute(ctx, ggml_sum_rows(ctx, sc), 2, 1, 0, 3));          // [n_pool, tc, 1]
                 sc = ggml_reshape_2d(ctx, sc, n_pool, tc);
@@ -332,15 +344,29 @@ struct Builder {
             ggml_tensor* kg = ggml_get_rows(ctx, s.lat, ggml_reshape_1d(ctx, idx, n_sel * tc));   // [kv, n_sel*tc]
             kg = ggml_reshape_4d(ctx, kg, kv, n_sel, 1, tc);
             ggml_tensor* qc = ggml_view_3d(ctx, qa, kv, nh, tc, qa->nb[1], qa->nb[2], (size_t) c0 * qa->nb[2]);
-            qc = ggml_reshape_4d(ctx, ggml_cont(ctx, qc), kv, 1, nh, tc);
-            ggml_tensor* kq = mm(kg, qc);                                       // [n_sel, 1, nh, tc]
-            ggml_prec_set_acc(kq, GGML_PREC_F32);
-            kq = ggml_soft_max_ext(ctx, kq, mask_t, kq_scale, 0.0f);
             ggml_tensor* vt = ggml_cont(ctx, ggml_permute(ctx, kg, 1, 0, 2, 3));               // [n_sel, kv, 1, tc]
-            ggml_tensor* o = mm(vt, kq);                                       // [kv, 1, nh, tc]
-            outs = outs ? ggml_concat(ctx, outs, o, 3) : o;
+            ggml_tensor* o;
+            if (m.o.dsa_mm) {   // the heads are the columns: one mul_mm per token, reading the gathered rows once
+                // (the cont stays: mul_mm reading the slice in place gave a prompt other bits than streaming)
+                qc = ggml_reshape_4d(ctx, ggml_cont(ctx, qc), kv, nh, 1, tc);
+                ggml_tensor* kq = ggml_mul_mat(ctx, kg, qc);                             // [n_sel, nh, 1, tc]
+                ggml_prec_set_acc(kq, GGML_PREC_F32);
+                kq = ggml_reshape_4d(ctx, kq, n_sel, 1, nh, tc);                         // the mask broadcasts over nh
+                kq = ggml_soft_max_ext(ctx, kq, mask_t, kq_scale, 0.0f);
+                o = ggml_mul_mat(ctx, vt, ggml_reshape_4d(ctx, kq, n_sel, nh, 1, tc));   // [kv, nh, 1, tc]
+            } else {
+                qc = ggml_reshape_4d(ctx, ggml_cont(ctx, qc), kv, 1, nh, tc);
+                ggml_tensor* kq = mm(kg, qc);                                            // [n_sel, 1, nh, tc]
+                ggml_prec_set_acc(kq, GGML_PREC_F32);
+                kq = ggml_soft_max_ext(ctx, kq, mask_t, kq_scale, 0.0f);
+                o = mm(vt, kq);                                                          // [kv, 1, nh, tc]
+            }
+            outs.push_back(o);
         }
-        ggml_tensor* o = ggml_reshape_3d(ctx, outs, kv, nh, T);
+        // pairwise: a running concat copies everything before each chunk again (quadratic in the slice's chunks)
+        for (size_t w = 1; w < outs.size(); w *= 2)
+            for (size_t i = 0; i + w < outs.size(); i += 2 * w) outs[i] = ggml_concat(ctx, outs[i], outs[i + w], 3);
+        ggml_tensor* o = ggml_reshape_3d(ctx, outs[0], kv, nh, T);
         o = mm(m.wl(il, "attn_v_b.weight"), ggml_permute(ctx, o, 0, 2, 1, 3));   // [v, T, nh]
         o = ggml_cont_2d(ctx, ggml_permute(ctx, o, 0, 2, 1, 3), (int64_t) g.head_v_mla * nh, T);
         cb(o, "kqv_out", il);
@@ -581,7 +607,7 @@ bool GlmMetal::Impl::run_slice(const int32_t* tok, int T, std::vector<float>& lo
         const auto t0 = std::chrono::steady_clock::now();
         st.host_seconds += std::chrono::duration<double>(t0 - th).count();
         ++st.graphs;
-        if (ggml_backend_sched_graph_compute(sched, b.gf) != GGML_STATUS_SUCCESS) {
+            if (ggml_backend_sched_graph_compute(sched, b.gf) != GGML_STATUS_SUCCESS) {
             ggml_free(ctx);
             err = "the compute graph failed";
             return false;

@@ -486,7 +486,10 @@ bool GlmMetal::Impl::init_state(std::string& err) {
                                                o.max_window);
             }
         } else {
-            s.lat = ggml_new_tensor_2d(sctx, o.kv_f16 ? GGML_TYPE_F16 : GGML_TYPE_F32, g.kv_lora, n_ctx + 1);
+            // dsa_mm on the GPU rounds the gathered latent to half in mul_mm's tiles anyway: keeping it in F16 loses
+            // nothing more and halves the gather and its transpose (the CPU oracle keeps F32)
+            const bool lat16 = o.kv_f16 || (o.dsa_mm && gpu_dev);
+            s.lat = ggml_new_tensor_2d(sctx, lat16 ? GGML_TYPE_F16 : GGML_TYPE_F32, g.kv_lora, n_ctx + 1);
             s.ikg = ggml_new_tensor_2d(sctx, GGML_TYPE_F32, 2 * g.idx_key, n_ctx);
             s.pooled = ggml_new_tensor_2d(sctx, GGML_TYPE_F32, g.idx_key, n_pools);
         }

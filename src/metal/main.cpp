@@ -57,6 +57,7 @@ int main(int argc, char** argv) {
     int n_gen = 32;
     maya::metal::GlmOptions o;
     o.mtp = std::getenv("MAYA_GLM_NO_MTP") == nullptr && std::getenv("MAYA_GLM_NO_SPEC") == nullptr;
+    if (const char* v = std::getenv("MAYA_METAL_DSA_MM"); v && *v) o.dsa_mm = std::atoi(v) != 0;
     std::vector<std::string> rest;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];

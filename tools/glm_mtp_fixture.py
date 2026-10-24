@@ -55,9 +55,9 @@ def write(path: Path, md, ts, q8: bool):
     path.write_bytes(header + kvs + infos + pad + body)
 
 
-def build(big: bool, seed: int = 4242, nextn: bool = True):
-    g = S.BIG if big else S.SMALL
-    md, ts = S.build_big(777) if big else S.build(1234)
+def build(big: bool, seed: int = 4242, nextn: bool = True, wide: bool = False):
+    g = S.BIG if big else S.WIDE if wide else S.SMALL
+    md, ts = S.build_big(777) if big else S._build(S.WIDE, 1234, False) if wide else S.build(1234)
     if not nextn:
         return md, ts
     n, e = g["n_layers"], g["n_embd"]
@@ -123,8 +123,9 @@ def main() -> int:
     ap.add_argument("--big", action="store_true", help="the 45-layer fixture's trunk")
     ap.add_argument("--no-nextn", action="store_true", help="the trunk alone (no NextN block)")
     ap.add_argument("--q8-experts", action="store_true", help="the routed experts as Q8_0")
+    ap.add_argument("--wide", action="store_true", help="the small trunk with 16 heads (glm_synth_gguf.WIDE)")
     a = ap.parse_args()
-    md, ts = build(a.big, nextn=not a.no_nextn)
+    md, ts = build(a.big, nextn=not a.no_nextn, wide=a.wide)
     write(Path(a.out), md, ts, a.q8_experts)
     print(f"wrote {a.out} ({Path(a.out).stat().st_size / 1e6:.1f} MB)")
     return 0
