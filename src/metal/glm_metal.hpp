@@ -148,6 +148,7 @@ public:
     // grow the expert pool into memory freed since it was sized (it starts from what was free then): up to the
     // GPU's working-set budget, keeping the headroom free.  Returns the bytes added; cheap when nothing changed.
     size_t grow_pool();
+    bool pool_holds_all() const;   // every routed expert has a slot (grown slots fill on first use, then nothing misses)
 
     void snapshot_save();
     bool snapshot_restore();          // false: no snapshot

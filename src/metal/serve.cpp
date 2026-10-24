@@ -33,6 +33,8 @@
 
 namespace maya::metal {
 
+int mtp_draft_cap();
+
 namespace {
 
 constexpr int32_t kEos[] = {154820, 154827, 154829};
@@ -104,6 +106,7 @@ struct Server {
     const int loop_w_answer = env_int("MAYA_GLM_LOOP_ANSWER", 1024);
     int chunk = 512;
     bool mtp = false;                           // the NextN block drafts (has_mtp(), not MAYA_GLM_NO_MTP)
+    bool mtp_auto = false;                      // mtp follows the pool (no MAYA_GLM_MTP_DECODE, MTP allowed)
     std::unique_ptr<DraftLength> mtp_len;       // kept across requests: what drafts were worth on this machine
 
     // the request's images, for the prefix check (generate.cpp's img_hash): FNV-1a over the rows and positions
@@ -491,9 +494,17 @@ struct Server {
                     std::chrono::duration<double, std::milli>(t1 - t0).count(),
                     std::chrono::duration<double, std::milli>(t2 - t1).count(), finish, reuse);
         std::fflush(stdout);
-        if (const size_t grown = model.grow_pool())   // memory freed since the start: more experts stay resident
+        if (const size_t grown = model.grow_pool()) {   // memory freed since the start: more experts stay resident
             std::fprintf(stderr, "maya-metal: the expert pool grew by %.1f GB to %.1f GB\n", grown / 1e9,
                          model.stats().pool_bytes / 1e9);
+            // started short (a restart before the old engine's memory came back): MTP's default turns on once the
+            // pool holds every expert, as it would have at a start with that memory
+            if (mtp_auto && !mtp && model.pool_holds_all()) {
+                mtp = true;
+                mtp_len = std::make_unique<DraftLength>(mtp_draft_cap());
+                std::fprintf(stderr, "maya-metal: every expert has a slot now: MTP drafting is on\n");
+            }
+        }
         std::string pe;   // this machine's expert usage, for the next start (after DONE: nobody waits on it)
         if (!model.save_profile(pe)) std::fprintf(stderr, "maya-metal: %s\n", pe.c_str());
         if (produced > 0) {
@@ -526,6 +537,8 @@ int serve(GlmMetal& model, const std::vector<std::string>& args) {
     const bool mtp_wanted = md && *md ? std::atoi(md) != 0 : model.stats().experts_all_resident;
     s.mtp = mtp_wanted && model.has_mtp() && std::getenv("MAYA_GLM_NO_MTP") == nullptr &&
             std::getenv("MAYA_GLM_NO_SPEC") == nullptr;
+    s.mtp_auto = !(md && *md) && model.has_mtp() && std::getenv("MAYA_GLM_NO_MTP") == nullptr &&
+                 std::getenv("MAYA_GLM_NO_SPEC") == nullptr;
     if (model.has_mtp() && !s.mtp)
         std::printf("NOTE MTP drafting is off (the experts stream from the SSD); MAYA_GLM_NO_MTP=1 frees the NextN "
                     "block's memory for the expert pool\n");

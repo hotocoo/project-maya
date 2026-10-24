@@ -969,6 +969,7 @@ bool GlmMetal::save_profile(std::string& err) const {
     return true;
 }
 
+bool GlmMetal::pool_holds_all() const { return p_->pool.holds_all(); }
 const GlmGeometry& GlmMetal::geometry() const { return p_->g; }
 int64_t GlmMetal::position() const { return p_->pos; }
 int64_t GlmMetal::max_context() const { return p_->n_ctx; }

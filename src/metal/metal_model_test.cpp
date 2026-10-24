@@ -204,6 +204,8 @@ int big(const std::string& gguf, const std::string& expect) {
     GlmMetal m;
     load(m, gguf, 1024);
     require(m.geometry().n_layers == 45, "the big fixture has 45 layers");
+    // (MTP turns on mid-session once a streaming pool grows to hold every expert)
+    require(m.pool_holds_all() == (env("MAYA_METAL_POOL_SLOTS") == 0), "pool_holds_all() disagrees with the pool");
     const size_t V = (size_t) m.geometry().n_vocab;
     std::vector<int32_t> tokens;
     for (size_t i = 0; i < T; ++i) tokens.push_back((int32_t) ((i % 511) + 1));

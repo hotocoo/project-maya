@@ -252,6 +252,8 @@ bool ExpertPool::init(const std::vector<std::vector<ExpertMatrix>>& layers, int 
     std::vector<Group> formats = std::move(groups_);
     groups_.clear();
     all_resident_ = forced_slots <= 0;
+    n_pairs_ = 0;
+    for (const Layer& L : layers_) n_pairs_ += L.group >= 0 ? n_expert : 0;
     std::vector<std::vector<int>> by_format(formats.size());   // each format's layers, in order (before re-tagging)
     for (size_t l = 0; l < layers_.size(); ++l)
         if (layers_[l].group >= 0) by_format[(size_t) layers_[l].group].push_back((int) l);

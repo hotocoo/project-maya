@@ -81,6 +81,9 @@ public:
     void count(int layer, const int32_t* experts, size_t n);
 
     bool all_resident() const { return all_resident_; }
+    // every routed expert has a slot in use (all resident, or a streaming pool grown that far: after each expert's
+    // first use, nothing misses)
+    bool holds_all() const { return all_resident_ || slots_total() >= (size_t) n_pairs_; }
     // all resident: expert e of `layer` sits in slot slot_base(layer) + e of its group
     int slot_base(int layer) const { return layers_[(size_t) layer].base; }
     size_t slots_total() const;
@@ -114,6 +117,7 @@ private:
     std::vector<std::pair<void*, size_t>> mem_;
     ParallelReader* reader_ = nullptr;
     int n_expert_ = 0;
+    int n_pairs_ = 0;                    // (layer, expert) pairs with routed experts
     std::vector<uint32_t> usage_;
     uint64_t tick_ = 0;
     uint32_t call_ = 0;
