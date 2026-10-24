@@ -1008,6 +1008,7 @@ bool GlmMetal::pool_holds_all() const { return p_->pool.holds_all(); }
 const GlmGeometry& GlmMetal::geometry() const { return p_->g; }
 int64_t GlmMetal::position() const { return p_->pos; }
 int64_t GlmMetal::max_context() const { return p_->n_ctx; }
+int GlmMetal::ubatch() const { return p_->o.n_ubatch; }
 const GlmStats& GlmMetal::stats() const { return p_->st; }
 
 std::string GlmMetal::describe() const {

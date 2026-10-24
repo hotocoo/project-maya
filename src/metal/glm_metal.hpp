@@ -62,7 +62,8 @@ struct GlmGeometry {
 
 struct GlmOptions {
     bool use_gpu = true;              // false: ggml-cpu only (the oracle the Metal path is checked against)
-    int n_ubatch = 512;               // tokens per forward slice
+    int n_ubatch = 2048;              // tokens per forward slice: 8 of 288 experts get ~57 tokens each, past
+                                      // mul_mm_id's 32-column tiles (at 512, ~14: +20-37% prefill measured, ~0.3 GB)
     int attn_chunk = 32;              // tokens per sparse-attention gather inside a slice
     bool dsa_mm = true;               // DSA products with the heads as matrix columns (ggml-metal's mul_mm, half
                                       // tiles); false: one f32 matvec per head (MAYA_METAL_DSA_MM=0)
@@ -160,6 +161,7 @@ public:
     const GlmGeometry& geometry() const;
     int64_t position() const;
     int64_t max_context() const;
+    int ubatch() const;   // tokens per forward slice (GlmOptions::n_ubatch)
     const GlmStats& stats() const;
     std::string describe() const;     // one line: backend, memory plan
 

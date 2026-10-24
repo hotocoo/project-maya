@@ -23,7 +23,7 @@ void usage() {
     std::fprintf(stderr,
                  "usage: maya-metal --gguf MODEL.gguf [--serve | --ids 1,2,3 [--n N]]\n"
                  "  --max-context N      tokens the KV cache holds (default 32768)\n"
-                 "  --ubatch N           prompt tokens per slice (default 512)\n"
+                 "  --ubatch N           prompt tokens per slice (default 2048)\n"
                  "  --expert-gb X        unified memory for the routed-expert pool (default: what the GPU's\n"
                  "                       working set leaves after the dense weights and the cache)\n"
                  "  --io-threads N       parallel SSD reads for expert misses (default 16)\n"

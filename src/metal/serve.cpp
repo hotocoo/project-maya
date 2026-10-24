@@ -104,7 +104,7 @@ struct Server {
     uint64_t cached_img = 0;          // the images inside it (positions and rows, hashed)
     const int loop_w_think = env_int("MAYA_GLM_LOOP_THINK", 256);
     const int loop_w_answer = env_int("MAYA_GLM_LOOP_ANSWER", 1024);
-    int chunk = 512;
+    int chunk = 512;                            // prompt tokens a forward() takes: the engine's slice (serve())
     bool mtp = false;                           // the NextN block drafts (has_mtp(), not MAYA_GLM_NO_MTP)
     bool mtp_auto = false;                      // mtp follows the pool (no MAYA_GLM_MTP_DECODE, MTP allowed)
     std::unique_ptr<DraftLength> mtp_len;       // kept across requests: what drafts were worth on this machine
@@ -528,6 +528,9 @@ int serve(GlmMetal& model, const std::vector<std::string>& args) {
     (void) args;   // the server's CUDA-engine flags (--expert-cache, --prefill, --kv-streaming ...) mean nothing here
     std::setvbuf(stdout, nullptr, _IOLBF, 0);
     Server s{model, {}, {}};
+    // a prompt goes to forward() a slice at a time (STOP and the PP lines land between them): one --ubatch slice, or
+    // 512-token pieces cut every --ubatch 2048 slice to 512 and its experts' tiles ran a quarter full
+    s.chunk = model.ubatch();
     if (const char* c = std::getenv("MAYA_METAL_PP_CHUNK")) s.chunk = std::max(1, std::atoi(c));
     // MTP drafts by default only when every expert is resident: then a token is GPU work and a verify window writes
     // several for about the price of one.  With experts streamed from the SSD a window needs more of them than one
