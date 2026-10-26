@@ -68,6 +68,11 @@ Decoding drafts a few tokens ahead and checks them in one pass of the model (a v
 weights can write several tokens. The drafts never change the answer: every row of the window is picked exactly as
 plain decoding picks it (the same sampler, the same seed counter, the same penalties), and the tokens after the first
 draft the model would not have written are dropped, the recurrent state rolled back to that row.
+A window's rows are not the same bits as single tokens, though (within 4.9e-6 of them, below): ggml-metal picks its
+matrix kernel by the column count, so where two tokens nearly tie, a window of another length can pick the other one.
+The MTP draft length adapts to measured timing and is kept across requests, so the same greedy request can take
+another path the second time (a prefix-cache hit after a cold prompt, say). `MAYA_GLM_MTP_FIXED=N` fixes the length;
+`spec=1` (or `MAYA_GLM_MTP_DECODE=0`) decodes one token at a time.
 
 - **MTP**: the model's own NextN block drafts with chained greedy steps; the draft length adapts to how many drafts are
   accepted and what a round costs on this Mac (as on CUDA: `MAYA_GLM_MTP_DRAFT`, `MAYA_GLM_MTP_FIXED`,
